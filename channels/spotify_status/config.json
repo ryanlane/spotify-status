@@ -49,8 +49,8 @@
   ],
   "settings": {
     "defaults": {
-      "client_id": "",
-      "client_secret": "", 
+      "client_id": "2de24533eb004c109074237acfd67dce",
+      "client_secret": "01f05558cf0c469fafc74a90a585206a", 
       "redirect_uri": "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
       "update_interval_unit": "minutes",
       "update_interval_value": 30,
@@ -64,13 +64,13 @@
           "type": "string",         
           "title": "Spotify API Client ID",
           "description": "Your Spotify API Client ID",
-          "default": ""
+          "default": "2de24533eb004c109074237acfd67dce"
         },
         "client_secret": {
           "type": "string",         
           "title": "Spotify API Client Secret",
           "description": "Your Spotify API Client Secret",
-          "default": ""
+          "default": "01f05558cf0c469fafc74a90a585206a"
         },
         "redirect_uri": {
           "type": "string",         
