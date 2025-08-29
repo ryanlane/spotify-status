@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spotify Status Manager</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        body {
+            margin: 0;
+            padding: 24px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f8f9fa;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            padding: 32px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        
+        .header h1 {
+            margin: 0 0 8px 0;
+            color: #1db954;
+            font-size: 2rem;
+        }
+        
+        .header p {
+            margin: 0;
+            color: #6c757d;
+        }
+        
+        .status-card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-dot.connected {
+            background: #1db954;
+        }
+        
+        .status-dot.disconnected {
+            background: #dc3545;
+        }
+        
+        .track-info {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid #dee2e6;
+        }
+        
+        .track-info.playing {
+            border-color: #1db954;
+            background: #f0fdf4;
+        }
+        
+        .track-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #212529;
+        }
+        
+        .track-artist {
+            color: #6c757d;
+            margin-bottom: 4px;
+        }
+        
+        .track-album {
+            color: #9ca3af;
+            font-size: 0.9rem;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-top: 24px;
+        }
+        
+        .btn {
+            background: #1db954;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 20px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background 0.2s;
+        }
+        
+        .btn:hover {
+            background: #1ed760;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+        }
+        
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: #e9ecef;
+            border-radius: 2px;
+            margin: 12px 0;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: #1db954;
+            transition: width 1s linear;
+        }
+        
+        .time-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.8rem;
+            color: #6c757d;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        
+        .error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎵 Spotify Status</h1>
+            <p>Monitor your currently playing track</p>
+        </div>
+        
+        <div id="loading" class="loading">
+            <h3>Loading Spotify status...</h3>
+        </div>
+        
+        <div id="content" style="display: none;">
+            <div class="status-card">
+                <div class="status-indicator">
+                    <div class="status-dot" id="status-dot"></div>
+                    <span id="status-text">Checking connection...</span>
+                </div>
+                
+                <div class="track-info" id="track-info">
+                    <!-- Track information will be inserted here -->
+                </div>
+                
+                <div class="controls">
+                    <button class="btn" onclick="refreshStatus()">🔄 Refresh Status</button>
+                    <button class="btn" onclick="generateImage()">🖼️ Generate Image</button>
+                    <button class="btn btn-secondary" onclick="showSettings()">⚙️ Settings</button>
+                </div>
+                
+                <div id="error" class="error" style="display: none;">
+                    <!-- Error messages will appear here -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script type="module">
+        // Set the base URL for API calls
+        window.mimirServerBaseUrl = window.location.origin;
+        const apiBaseUrl = window.mimirServerBaseUrl;
+        
+        let currentTrack = null;
+        let statusData = null;
+        
+        async function loadStatus() {
+            try {
+                const response = await fetch(`${apiBaseUrl}/api/channels/com.spotify.status/current-track`);
+                const data = await response.json();
+                
+                if (data.success && data.track) {
+                    currentTrack = data.track;
+                    updateTrackDisplay(data.track);
+                    updateStatusIndicator(true, 'Connected to Spotify');
+                } else {
+                    currentTrack = null;
+                    updateTrackDisplay(null);
+                    updateStatusIndicator(true, 'Connected but no music playing');
+                }
+                
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+                hideError();
+                
+            } catch (error) {
+                console.error('Failed to load status:', error);
+                updateStatusIndicator(false, 'Connection failed');
+                showError('Failed to connect to Spotify API. Please check your configuration.');
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+            }
+        }
+        
+        function updateStatusIndicator(connected, message) {
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            
+            dot.className = `status-dot ${connected ? 'connected' : 'disconnected'}`;
+            text.textContent = message;
+        }
+        
+        function updateTrackDisplay(track) {
+            const trackInfo = document.getElementById('track-info');
+            
+            if (track) {
+                trackInfo.className = 'track-info playing';
+                trackInfo.innerHTML = `
+                    <div class="track-title">${escapeHtml(track.name)}</div>
+                    <div class="track-artist">by ${escapeHtml(track.artist)}</div>
+                    <div class="track-album">from ${escapeHtml(track.album)}</div>
+                    ${track.progress_ms && track.duration_ms ? `
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${(track.progress_ms / track.duration_ms) * 100}%"></div>
+                        </div>
+                        <div class="time-info">
+                            <span>${formatTime(track.progress_ms)}</span>
+                            <span>${formatTime(track.duration_ms)}</span>
+                        </div>
+                    ` : ''}
+                    <div style="margin-top: 12px; color: #6c757d; font-size: 0.9rem;">
+                        Playing on ${escapeHtml(track.device)}
+                    </div>
+                `;
+            } else {
+                trackInfo.className = 'track-info';
+                trackInfo.innerHTML = `
+                    <div class="track-title">No music playing</div>
+                    <div class="track-artist">Start playing music on Spotify to see it here</div>
+                `;
+            }
+        }
+        
+        function formatTime(ms) {
+            const minutes = Math.floor(ms / 60000);
+            const seconds = Math.floor((ms % 60000) / 1000);
+            return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+        
+        function hideError() {
+            document.getElementById('error').style.display = 'none';
+        }
+        
+        window.refreshStatus = async function() {
+            await loadStatus();
+        };
+        
+        window.generateImage = async function() {
+            try {
+                const response = await fetch(`${apiBaseUrl}/api/channels/com.spotify.status/request_image`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        options: { width: 800, height: 480 }
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Open image in new window
+                    const imageWindow = window.open('', '_blank');
+                    imageWindow.document.write(`
+                        <html>
+                            <head><title>Spotify Status Image</title></head>
+                            <body style="margin:0; background:#000; display:flex; align-items:center; justify-content:center;">
+                                <img src="data:image/jpeg;base64,${data.image}" style="max-width:100%; max-height:100%;">
+                            </body>
+                        </html>
+                    `);
+                } else {
+                    showError(`Failed to generate image: ${data.error || 'Unknown error'}`);
+                }
+                
+            } catch (error) {
+                console.error('Failed to generate image:', error);
+                showError('Failed to generate image. Please try again.');
+            }
+        };
+        
+        window.showSettings = function() {
+            alert('Settings panel coming soon! Configure your Spotify credentials in the channel configuration.');
+        };
+        
+        // Load status on page load
+        loadStatus();
+        
+        // Refresh every 30 seconds
+        setInterval(loadStatus, 30000);
+    </script>
+</body>
+</html>

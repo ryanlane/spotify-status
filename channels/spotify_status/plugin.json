@@ -1,0 +1,46 @@
+{
+  "id": "com.spotify.status",
+  "name": "Spotify Status Channel",
+  "description": "Display currently playing Spotify track album art and metadata",
+  "version": "1.0.0",
+  "type": "embedded",
+  "entry_point": "channel.py",
+  "class_name": "SpotifyStatusChannel",
+  "icon": "music",
+  "author": "Mimir Platform",
+  "tags": ["spotify", "music", "album-art", "display", "status"],
+  "config": {
+    "supports_upload": false,
+    "supports_gallery": false,
+    "supports_spotify": true,
+    "image_formats": ["jpg", "jpeg", "png"],
+    "max_file_size": "5MB",
+    "requires_auth": true
+  },
+  "requirements": {
+    "python": ">=3.8",
+    "dependencies": ["fastapi", "requests", "pillow", "spotipy"]
+  },
+  "endpoints": [
+    {
+      "path": "/manifest",
+      "method": "GET",
+      "description": "Get channel manifest and capabilities"
+    },
+    {
+      "path": "/request_image", 
+      "method": "POST",
+      "description": "Get current playing track album art"
+    },
+    {
+      "path": "/health",
+      "method": "GET",
+      "description": "Check Spotify API connectivity"
+    },
+    {
+      "path": "/current-track",
+      "method": "GET",
+      "description": "Get currently playing track metadata"
+    }
+  ]
+}
