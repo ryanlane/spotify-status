@@ -44,9 +44,31 @@ class SpotifyStatusChannel:
     with optional metadata overlay for e-paper display.
     """
     
-    def __init__(self, config: Dict[str, Any]):
-        """Initialize Spotify Status Channel with configuration"""
-        self.config = config
+    def __init__(self, config: Any):  # Accept Any to be robust against loader passing a path string
+        """Initialize Spotify Status Channel.
+
+        The plugin discovery layer currently instantiates channel classes by passing the plugin
+        directory path as a string. Original implementation expected a dict and would therefore
+        raise an AttributeError when calling dict methods on a str, causing manifest generation
+        to fail and the API to return 404 for /manifest. We normalize the incoming value here.
+
+        Supported constructor inputs now:
+        - dict: treated as full config object (legacy / future explicit config)
+        - str or Path: treated as root path; config scaffold created
+        - None: empty default config scaffold
+        """
+        # Normalize input into a dict structure: { 'root_path': <path>, 'spotify': { ... } }
+        normalized: Dict[str, Any]
+        if isinstance(config, dict):
+            normalized = config
+        elif isinstance(config, (str, Path)):
+            normalized = {"root_path": str(config), "spotify": {}}
+        elif config is None:
+            normalized = {"spotify": {}}
+        else:
+            # Last-resort fallback to avoid breaking initialization
+            normalized = {"unexpected_config_type": str(type(config)), "spotify": {}}
+        self.config = normalized
         self.channel_dir = Path(__file__).parent
         self.data_dir = self.channel_dir / "data"
         self.ui_dir = self.channel_dir / "ui"
@@ -67,14 +89,18 @@ class SpotifyStatusChannel:
 
         # Load persisted settings if present and merge with provided config
         persisted = self._load_settings()
-        if persisted:
-            # Do not overwrite explicitly passed values; merge where missing
-            base_spotify_cfg = self.config.get("spotify", {})
-            merged = {**persisted.get("spotify", {}), **base_spotify_cfg}
-            self.config["spotify"] = merged
-        else:
-            # Persist initial empty or provided settings skeleton
-            self._save_settings(self.config)
+        try:
+            if persisted:
+                # Merge persisted settings with provided config (provided wins)
+                base_spotify_cfg = self.config.get("spotify", {}) or {}
+                persisted_spotify_cfg = persisted.get("spotify", {}) or {}
+                merged = {**persisted_spotify_cfg, **base_spotify_cfg}
+                self.config["spotify"] = merged
+            else:
+                # Persist initial scaffold so subsequent restarts retain structure
+                self._save_settings(self.config)
+        except Exception as merge_e:  # noqa: BLE001
+            logger.warning("[SpotifyStatusChannel] Failed merging persisted settings: %s", merge_e)
         
         # Initialize Spotify client
         if not self.degraded:
