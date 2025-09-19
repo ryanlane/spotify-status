@@ -584,6 +584,25 @@ class SpotifyStatusChannel:
                     "fastapi>=0.100.0"
                 ]
             })
+
+        # --- Feature detection support (frontend calls /test to probe channel capabilities) ---
+        @router.post("/test", summary="Channel test endpoint")
+        async def test_endpoint():  # noqa: D401
+            return JSONResponse({
+                "success": True,
+                "id": "com.spotify.status",
+                "message": "Spotify channel responsive",
+                "degraded": self.degraded,
+                "authorized": self.spotify_client is not None
+            })
+
+        # --- Compatibility: some frontend code may expect /image_request instead of /request_image ---
+        @router.post("/image_request", summary="Generate image (compat)")
+        async def request_image_compat(payload: Dict[str, Any] = None):  # noqa: D401
+            result = await self.request_image(payload or {})
+            # Indicate this came via compatibility route for debugging
+            result["compat_endpoint"] = True
+            return JSONResponse(result)
         
         # Mount UI static files (primary) + explicit fallbacks for environments that do not honor router.mount
         try:
