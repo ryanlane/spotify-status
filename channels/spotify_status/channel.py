@@ -300,6 +300,16 @@ class SpotifyStatusChannel:
             authorized = self.spotify_client is not None
             market = spotify_cfg.get("market")
             additional_types = spotify_cfg.get("additional_types")
+            # Compute a simple content fingerprint for UI (mtime sum)
+            try:
+                ui_hash_parts = []
+                if self.ui_dir.exists():
+                    for p in self.ui_dir.glob('*'):
+                        if p.is_file():
+                            ui_hash_parts.append(str(int(p.stat().st_mtime)))
+                ui_fingerprint = '-'.join(ui_hash_parts)
+            except Exception:  # noqa: BLE001
+                ui_fingerprint = 'unknown'
             
             return {
                 "id": "com.spotify.status",
@@ -331,7 +341,8 @@ class SpotifyStatusChannel:
                     },
                     "styles": "/api/channels/com.spotify.status/ui/styles.css",
                     "icon": "🎵",
-                    "title": "Spotify Status"
+                    "title": "Spotify Status",
+                    "fingerprint": ui_fingerprint
                 },
                 "current_track": current_track,
                 "status": self.get_status()
@@ -522,6 +533,20 @@ class SpotifyStatusChannel:
                 return JSONResponse({"success": True, "message": "Spotify authorized", "connected": True})
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Auth callback failed: {str(e)}")
+
+        # ---------------- Core Channel Contract Endpoints (for API docs visibility) -----------------
+        @router.get("/manifest", summary="Channel manifest")
+        async def manifest_endpoint():
+            return JSONResponse(self.get_manifest())
+
+        @router.post("/request_image", summary="Generate Spotify status image")
+        async def request_image_endpoint(payload: Dict[str, Any] = None):  # noqa: D401
+            result = await self.request_image(payload or {})
+            return JSONResponse(result)
+
+        @router.get("/health", summary="Health check")
+        async def health_endpoint():  # noqa: D401
+            return JSONResponse({"success": True, "status": self.get_status()})
         
         # Mount UI static files (primary) + explicit fallbacks for environments that do not honor router.mount
         try:
@@ -562,6 +587,30 @@ class SpotifyStatusChannel:
             if not path.exists():
                 raise HTTPException(status_code=404, detail="index.html not found")
             return FileResponse(str(path), media_type="text/html")
+
+        # ---------------- Debug Helpers -----------------
+        @router.get("/ui/debug-list")
+        async def ui_debug_list():
+            if not self.ui_dir.exists():
+                return JSONResponse({"exists": False, "path": str(self.ui_dir)})
+            files = []
+            for p in sorted(self.ui_dir.glob('*')):
+                files.append({
+                    "name": p.name,
+                    "is_file": p.is_file(),
+                    "size": p.stat().st_size if p.is_file() else None,
+                    "mtime": p.stat().st_mtime
+                })
+            return JSONResponse({
+                "exists": True,
+                "path": str(self.ui_dir),
+                "count": len(files),
+                "files": files
+            })
+
+        @router.get("/ui/ping")
+        async def ui_ping():
+            return JSONResponse({"ok": True, "message": "spotify ui router active"})
         
         return router
 
