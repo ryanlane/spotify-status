@@ -586,15 +586,23 @@ class SpotifyStatusChannel:
             })
 
         # --- Feature detection support (frontend calls /test to probe channel capabilities) ---
-        @router.post("/test", summary="Channel test endpoint")
-        async def test_endpoint():  # noqa: D401
-            return JSONResponse({
+        # Support both POST and GET because some frontend code may probe with GET
+        def _test_payload() -> Dict[str, Any]:
+            return {
                 "success": True,
                 "id": "com.spotify.status",
                 "message": "Spotify channel responsive",
                 "degraded": self.degraded,
                 "authorized": self.spotify_client is not None
-            })
+            }
+
+        @router.post("/test", summary="Channel test endpoint (POST)")
+        async def test_post_endpoint():  # noqa: D401
+            return JSONResponse(_test_payload())
+
+        @router.get("/test", summary="Channel test endpoint (GET)")
+        async def test_get_endpoint():  # noqa: D401
+            return JSONResponse(_test_payload())
 
         # --- Compatibility: some frontend code may expect /image_request instead of /request_image ---
         @router.post("/image_request", summary="Generate image (compat)")
