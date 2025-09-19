@@ -356,6 +356,11 @@ class SpotifyStatusChannel:
                     "components": {
                         "manager": "/api/channels/com.spotify.status/ui/manage.esm.js"
                     },
+                    # Explicit element names so host UI can mount correct custom elements
+                    "elements": {
+                        "manager": "x-spotify-status-manager",
+                        "card": "x-spotify-status-card"
+                    },
                     "styles": "/api/channels/com.spotify.status/ui/styles.css",
                     "icon": "🎵",
                     "title": "Spotify Status",
