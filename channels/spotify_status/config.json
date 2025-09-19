@@ -29,8 +29,8 @@
       },
       "renderMode": "element",
       "integrity": {
-        "module": "sha384-RjLq7ZwdGajSCyb7XwExD8MgFOWAQyOWG5YEJ3rAFaEPdRmUcm0dr3W07go5kiVy",
-        "style": "sha384-WDQcixiu+7CxVwxbEb5MdHQjhF7uWwiKCYVLUTgkCwMGmBwThlpklpNsVspPIims"
+        "module": "sha384-zj1egY+uXM0cums45kW39nx8tD53OEwlZVMQfCJ15ZyIfr4EfX3/RH1CCWNaPi+J",
+        "style": "sha384-Rnsz1SGJKR8L5VKK7MdCa0W5oc7Li+2X4tFskHwTEW+l+49H7DVkXKlktIeRT5s7"
       }
     },
     {
@@ -43,7 +43,7 @@
       },
       "renderMode": "element",
       "integrity": {
-        "module": "sha384-7JQpQDWv2TXpfW1UfFuAxmAWvb8RRFhmBfBbMzf/MYO2EIvpRQ9AMWHDPmgR6pC4"
+        "module": "sha384-1jdnyVVU4JYT/1M7JYU9jooMmrUjarvthk87je2LLjdARvjjxduNoQsRGk7aemaJ"
       }
     }
   ],

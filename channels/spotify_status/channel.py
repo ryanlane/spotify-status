@@ -15,15 +15,25 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from PIL import Image, ImageDraw, ImageFont
 
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth
+_SPOTIPY_AVAILABLE = False
+spotipy = None  # type: ignore
+SpotifyOAuth = None  # type: ignore
+
+# We need logging configured before we can safely log missing dependency status
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+try:  # Optional dependency guard so router still mounts even if spotipy missing
+    import spotipy  # type: ignore
+    from spotipy.oauth2 import SpotifyOAuth  # type: ignore
+    _SPOTIPY_AVAILABLE = True
+except ImportError:  # noqa: BLE001
+    logger.warning("[SpotifyStatusChannel] 'spotipy' not installed – channel running in degraded mode (no Spotify API calls)")
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# (logging already configured above)
 
 
 class SpotifyStatusChannel:
@@ -42,6 +52,7 @@ class SpotifyStatusChannel:
         self.ui_dir = self.channel_dir / "ui"
         self.settings_path = self.data_dir / "settings.json"
         self.token_path = self.data_dir / ".spotify_cache"  # spotipy cache path
+        self.degraded = not _SPOTIPY_AVAILABLE
         
         # Ensure directories exist
         self.data_dir.mkdir(exist_ok=True)
@@ -64,7 +75,10 @@ class SpotifyStatusChannel:
             self._save_settings(self.config)
         
         # Initialize Spotify client
-        self._initialize_spotify_client()
+        if not self.degraded:
+            self._initialize_spotify_client()
+        else:
+            logger.info("[SpotifyStatusChannel] Initialization skipped (degraded mode: missing spotipy)")
         
         logger.info(f"Spotify Status Channel initialized: {self.channel_dir}")
 
@@ -92,6 +106,9 @@ class SpotifyStatusChannel:
     
     def _initialize_spotify_client(self):
         """Initialize Spotify API client with OAuth"""
+        if self.degraded:
+            logger.debug("[SpotifyStatusChannel] Skipping client init due to degraded mode")
+            return
         try:
             # Load Spotify credentials from config or environment
             spotify_config = self.config.get("spotify", {})
@@ -345,7 +362,9 @@ class SpotifyStatusChannel:
                     "fingerprint": ui_fingerprint
                 },
                 "current_track": current_track,
-                "status": self.get_status()
+                "status": self.get_status(),
+                "degraded": self.degraded,
+                "dependencies": {"spotipy": _SPOTIPY_AVAILABLE}
             }
             
         except Exception as e:
@@ -547,6 +566,19 @@ class SpotifyStatusChannel:
         @router.get("/health", summary="Health check")
         async def health_endpoint():  # noqa: D401
             return JSONResponse({"success": True, "status": self.get_status()})
+
+        @router.get("/dependencies", summary="Dependency status")
+        async def dependencies_endpoint():  # noqa: D401
+            return JSONResponse({
+                "spotipy_available": _SPOTIPY_AVAILABLE,
+                "degraded": self.degraded,
+                "expected": [
+                    "spotipy>=2.22.1",
+                    "Pillow>=10.0.0",
+                    "requests>=2.31.0",
+                    "fastapi>=0.100.0"
+                ]
+            })
         
         # Mount UI static files (primary) + explicit fallbacks for environments that do not honor router.mount
         try:
