@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 # Configure logging
@@ -435,6 +435,7 @@ class SpotifyStatusChannel:
     def get_router(self) -> APIRouter:
         """Get FastAPI router for custom endpoints"""
         router = APIRouter()
+        logger.info("[SpotifyStatusChannel] Building router and mounting UI directory: %s", self.ui_dir)
 
         # ---------------- Settings Endpoints -----------------
         @router.get("/settings")
@@ -522,8 +523,45 @@ class SpotifyStatusChannel:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Auth callback failed: {str(e)}")
         
-        # Mount UI static files
-        router.mount("/ui", StaticFiles(directory=str(self.ui_dir)), name="ui")
+        # Mount UI static files (primary) + explicit fallbacks for environments that do not honor router.mount
+        try:
+            router.mount("/ui", StaticFiles(directory=str(self.ui_dir)), name="ui")
+            logger.info("[SpotifyStatusChannel] Mounted /ui static directory")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[SpotifyStatusChannel] Failed to mount static /ui directory: %s", e)
+
+        # --- Fallback explicit asset endpoints (in case platform doesn't use mounted static routes) ---
+        @router.get("/ui/index.esm.js")
+        async def ui_index_js():  # noqa: D401
+            """Serve dashboard card module (fallback)."""
+            path = self.ui_dir / "index.esm.js"
+            if not path.exists():
+                raise HTTPException(status_code=404, detail="index.esm.js not found")
+            return FileResponse(str(path), media_type="text/javascript")
+
+        @router.get("/ui/manage.esm.js")
+        async def ui_manage_js():  # noqa: D401
+            """Serve manager module (fallback)."""
+            path = self.ui_dir / "manage.esm.js"
+            if not path.exists():
+                raise HTTPException(status_code=404, detail="manage.esm.js not found")
+            return FileResponse(str(path), media_type="text/javascript")
+
+        @router.get("/ui/styles.css")
+        async def ui_styles():  # noqa: D401
+            """Serve UI stylesheet (fallback)."""
+            path = self.ui_dir / "styles.css"
+            if not path.exists():
+                raise HTTPException(status_code=404, detail="styles.css not found")
+            return FileResponse(str(path), media_type="text/css")
+
+        @router.get("/ui/index.html")
+        async def ui_index_html():  # noqa: D401
+            """Serve standalone manager HTML (fallback)."""
+            path = self.ui_dir / "index.html"
+            if not path.exists():
+                raise HTTPException(status_code=404, detail="index.html not found")
+            return FileResponse(str(path), media_type="text/html")
         
         return router
 
