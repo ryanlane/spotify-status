@@ -59,6 +59,8 @@ class SpotifyStatusChannel:
         
         # Spotify API configuration
         self.spotify_client = None
+        # Holds OAuth token metadata (expires_at, access_token, refresh_token, etc.) once authorized
+        self.token_info = None  # type: Optional[Dict[str, Any]]
         self.last_track_cache = None
         self.cache_timestamp = None
         self.cache_duration = 30  # seconds
@@ -129,9 +131,22 @@ class SpotifyStatusChannel:
                 scope=scope,
                 cache_path=str(self.data_dir / ".spotify_cache")
             )
-            
-            self.spotify_client = spotipy.Spotify(auth_manager=auth_manager)
-            logger.info("Spotify client initialized successfully")
+
+            # Attempt to read cached token (so re-init after restart picks up prior auth)
+            try:
+                # Spotipy >=2.19 exposes cache handler; get access token without code to pull from cache
+                token_info = auth_manager.get_cached_token() if hasattr(auth_manager, 'get_cached_token') else None
+                if token_info and token_info.get('access_token'):
+                    self.token_info = token_info
+                    self.spotify_client = spotipy.Spotify(auth_manager=auth_manager)
+                    logger.info("Spotify client initialized from cached token")
+                else:
+                    # Not yet authorized; keep auth_manager handy for later callback use
+                    self.spotify_client = None
+                    logger.info("Spotify client not yet authorized (no cached token)")
+            except Exception as cache_e:  # noqa: BLE001
+                logger.debug(f"[SpotifyStatusChannel] No cached token available: {cache_e}")
+                self.spotify_client = None
             
         except Exception as e:
             logger.error(f"Failed to initialize Spotify client: {e}")
@@ -539,9 +554,10 @@ class SpotifyStatusChannel:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Failed to get current track: {str(e)}")
         
-        @router.post("/auth/callback")
-        async def spotify_auth_callback(request: Request):
-            """Handle Spotify OAuth callback"""
+        async def _handle_auth_callback(request: Request):
+            """Internal helper for Spotify OAuth callback (GET/POST)."""
+            if self.degraded:
+                raise HTTPException(status_code=500, detail="Spotipy dependency missing; cannot authorize")
             try:
                 params = dict(request.query_params)
                 code = params.get("code")
@@ -550,13 +566,58 @@ class SpotifyStatusChannel:
                     raise HTTPException(status_code=400, detail=f"Spotify authorization error: {error}")
                 if not code:
                     raise HTTPException(status_code=400, detail="Missing authorization code")
-                # Force re-init; SpotifyOAuth in _initialize_spotify_client will read cache
-                self._initialize_spotify_client()
-                if not self.spotify_client:
-                    raise HTTPException(status_code=500, detail="Failed to initialize Spotify client after auth")
-                return JSONResponse({"success": True, "message": "Spotify authorized", "connected": True})
-            except Exception as e:
+                cfg = self.config.get("spotify", {})
+                client_id = cfg.get("client_id")
+                client_secret = cfg.get("client_secret")
+                redirect_uri = cfg.get("redirect_uri", "http://localhost:8080/callback")
+                scope = "user-read-currently-playing user-read-playback-state"
+                if not (client_id and client_secret):
+                    raise HTTPException(status_code=400, detail="Client credentials not configured")
+                auth_manager = SpotifyOAuth(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    redirect_uri=redirect_uri,
+                    scope=scope,
+                    cache_path=str(self.token_path)
+                )
+                # Exchange code for token
+                try:
+                    token_info = auth_manager.get_access_token(code)  # type: ignore[arg-type]
+                except TypeError:
+                    # Some versions require arg name code
+                    token_info = auth_manager.get_access_token(code=code)  # type: ignore[call-arg]
+                if not token_info or 'access_token' not in token_info:
+                    raise HTTPException(status_code=500, detail="Failed to obtain access token from Spotify")
+                self.token_info = token_info
+                self.spotify_client = spotipy.Spotify(auth_manager=auth_manager)
+                logger.info("Spotify authorization completed; token expires at %s", token_info.get('expires_at'))
+                return JSONResponse({
+                    "success": True,
+                    "message": "Spotify authorized",
+                    "connected": True,
+                    "expires_at": token_info.get('expires_at')
+                })
+            except HTTPException:
+                raise
+            except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=500, detail=f"Auth callback failed: {str(e)}")
+
+        # Support both GET and POST for callback (Spotify typically uses GET redirect)
+        @router.get("/auth/callback")
+        async def spotify_auth_callback_get(request: Request):  # noqa: D401
+            return await _handle_auth_callback(request)
+
+        @router.post("/auth/callback")
+        async def spotify_auth_callback_post(request: Request):  # noqa: D401
+            return await _handle_auth_callback(request)
+
+        @router.get("/authorize/status")
+        async def authorize_status():  # noqa: D401
+            return JSONResponse({
+                "authorized": self.spotify_client is not None,
+                "degraded": self.degraded,
+                "token_expires_at": (self.token_info or {}).get('expires_at') if self.token_info else None
+            })
 
         # ---------------- Core Channel Contract Endpoints (for API docs visibility) -----------------
         @router.get("/manifest", summary="Channel manifest")
