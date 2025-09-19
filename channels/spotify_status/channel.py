@@ -40,6 +40,8 @@ class SpotifyStatusChannel:
         self.channel_dir = Path(__file__).parent
         self.data_dir = self.channel_dir / "data"
         self.ui_dir = self.channel_dir / "ui"
+        self.settings_path = self.data_dir / "settings.json"
+        self.token_path = self.data_dir / ".spotify_cache"  # spotipy cache path
         
         # Ensure directories exist
         self.data_dir.mkdir(exist_ok=True)
@@ -49,11 +51,44 @@ class SpotifyStatusChannel:
         self.last_track_cache = None
         self.cache_timestamp = None
         self.cache_duration = 30  # seconds
+
+        # Load persisted settings if present and merge with provided config
+        persisted = self._load_settings()
+        if persisted:
+            # Do not overwrite explicitly passed values; merge where missing
+            base_spotify_cfg = self.config.get("spotify", {})
+            merged = {**persisted.get("spotify", {}), **base_spotify_cfg}
+            self.config["spotify"] = merged
+        else:
+            # Persist initial empty or provided settings skeleton
+            self._save_settings(self.config)
         
         # Initialize Spotify client
         self._initialize_spotify_client()
         
         logger.info(f"Spotify Status Channel initialized: {self.channel_dir}")
+
+    # ------------------------------------------------------------------
+    # Settings Persistence
+    # ------------------------------------------------------------------
+    def _load_settings(self) -> Optional[Dict[str, Any]]:
+        if not self.settings_path.exists():
+            return None
+        try:
+            with open(self.settings_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to load settings.json: {e}")
+            return None
+
+    def _save_settings(self, settings: Dict[str, Any]) -> bool:
+        try:
+            with open(self.settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to save settings: {e}")
+            return False
     
     def _initialize_spotify_client(self):
         """Initialize Spotify API client with OAuth"""
@@ -96,7 +131,18 @@ class SpotifyStatusChannel:
             return self.last_track_cache
         
         try:
-            current_track = self.spotify_client.current_playback()
+            spotify_cfg = self.config.get("spotify", {})
+            market = spotify_cfg.get("market") or None
+            additional_types = spotify_cfg.get("additional_types") or None
+            # Validate additional_types (only track,episode allowed)
+            if additional_types:
+                cleaned = []
+                for t in str(additional_types).split(','):
+                    t = t.strip().lower()
+                    if t in ("track", "episode") and t not in cleaned:
+                        cleaned.append(t)
+                additional_types = ",".join(cleaned) if cleaned else None
+            current_track = self.spotify_client.current_playback(market=market, additional_types=additional_types)
             
             if not current_track or not current_track.get('is_playing'):
                 return None
@@ -249,6 +295,11 @@ class SpotifyStatusChannel:
         """Get channel manifest with capabilities"""
         try:
             current_track = self.get_current_track()
+            spotify_cfg = self.config.get("spotify", {})
+            configured = bool(spotify_cfg.get("client_id") and spotify_cfg.get("client_secret"))
+            authorized = self.spotify_client is not None
+            market = spotify_cfg.get("market")
+            additional_types = spotify_cfg.get("additional_types")
             
             return {
                 "id": "com.spotify.status",
@@ -262,6 +313,16 @@ class SpotifyStatusChannel:
                     "requires_auth": True,
                     "image_formats": ["jpg", "jpeg", "png"],
                     "max_file_size": "5MB"
+                },
+                "configuration": {
+                    "configured": configured,
+                    "authorized": authorized,
+                    "redirect_uri": spotify_cfg.get("redirect_uri", "http://localhost:8080/callback"),
+                    "client_id_present": bool(spotify_cfg.get("client_id")),
+                    # Never expose secret value (only presence)
+                    "client_secret_present": bool(spotify_cfg.get("client_secret")),
+                    "market": market,
+                    "additional_types": additional_types,
                 },
                 "ui": {
                     "entry_point": "/api/channels/com.spotify.status/ui/index.html",
@@ -291,6 +352,19 @@ class SpotifyStatusChannel:
             options = request_data.get("options", {}) if request_data else {}
             width = options.get("width", 800)
             height = options.get("height", 480)
+            spotify_cfg = self.config.get("spotify", {})
+            if not (spotify_cfg.get("client_id") and spotify_cfg.get("client_secret")):
+                return {
+                    "success": False,
+                    "error": "not_configured",
+                    "message": "Spotify credentials not configured",
+                }
+            if not self.spotify_client:
+                return {
+                    "success": False,
+                    "error": "not_authorized",
+                    "message": "Spotify not authorized. Complete OAuth flow.",
+                }
             
             # Get current track
             track_info = self.get_current_track()
@@ -361,6 +435,61 @@ class SpotifyStatusChannel:
     def get_router(self) -> APIRouter:
         """Get FastAPI router for custom endpoints"""
         router = APIRouter()
+
+        # ---------------- Settings Endpoints -----------------
+        @router.get("/settings")
+        async def get_settings():
+            cfg = self.config.get("spotify", {})
+            masked = {
+                "client_id": cfg.get("client_id"),
+                # Mask secret fully except last 4 chars
+                "client_secret": ("***" + cfg.get("client_secret", "")[-4:]) if cfg.get("client_secret") else None,
+                "redirect_uri": cfg.get("redirect_uri", "http://localhost:8080/callback"),
+                "configured": bool(cfg.get("client_id") and cfg.get("client_secret")),
+                "authorized": bool(self.spotify_client),
+                "market": cfg.get("market"),
+                "additional_types": cfg.get("additional_types"),
+            }
+            return JSONResponse({"success": True, "settings": masked})
+
+        @router.post("/settings")
+        async def update_settings(payload: Dict[str, Any]):
+            spotify_cfg = self.config.setdefault("spotify", {})
+            updated = False
+            for key in ("client_id", "client_secret", "redirect_uri", "market", "additional_types"):
+                if key in payload:
+                    spotify_cfg[key] = payload[key]
+                    updated = True
+            if updated:
+                self._save_settings(self.config)
+                # Reinitialize client after updating credentials
+                self._initialize_spotify_client()
+            return JSONResponse({"success": True, "updated": updated})
+
+        # ---------------- OAuth Initiation -----------------
+        @router.get("/authorize")
+        async def authorize():
+            cfg = self.config.get("spotify", {})
+            client_id = cfg.get("client_id")
+            client_secret = cfg.get("client_secret")
+            redirect_uri = cfg.get("redirect_uri", "http://localhost:8080/callback")
+            if not client_id or not client_secret:
+                raise HTTPException(status_code=400, detail="Spotify client_id and client_secret must be configured first")
+            scope = "user-read-currently-playing user-read-playback-state"
+            # Spotipy can build auth URL via helper
+            try:
+                auth_manager = SpotifyOAuth(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    redirect_uri=redirect_uri,
+                    scope=scope,
+                    cache_path=str(self.token_path),
+                    show_dialog=True,
+                )
+                auth_url = auth_manager.get_authorize_url()
+                return JSONResponse({"success": True, "authorize_url": auth_url})
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=500, detail=f"Failed to build authorize URL: {e}")
         
         @router.get("/current-track")
         async def get_current_track_endpoint():
@@ -378,8 +507,18 @@ class SpotifyStatusChannel:
         async def spotify_auth_callback(request: Request):
             """Handle Spotify OAuth callback"""
             try:
-                # This would handle the OAuth flow
-                return JSONResponse({"success": True, "message": "Authentication handled"})
+                params = dict(request.query_params)
+                code = params.get("code")
+                error = params.get("error")
+                if error:
+                    raise HTTPException(status_code=400, detail=f"Spotify authorization error: {error}")
+                if not code:
+                    raise HTTPException(status_code=400, detail="Missing authorization code")
+                # Force re-init; SpotifyOAuth in _initialize_spotify_client will read cache
+                self._initialize_spotify_client()
+                if not self.spotify_client:
+                    raise HTTPException(status_code=500, detail="Failed to initialize Spotify client after auth")
+                return JSONResponse({"success": True, "message": "Spotify authorized", "connected": True})
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Auth callback failed: {str(e)}")
         
