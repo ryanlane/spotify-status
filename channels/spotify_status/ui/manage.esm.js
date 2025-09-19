@@ -332,4 +332,10 @@ class SpotifyStatusManager extends HTMLElement {
   }
 }
 
-customElements.define('spotify-status-manager', SpotifyStatusManager);
+// Register both legacy and config-specified element names for compatibility
+if (!customElements.get('spotify-status-manager')) {
+  customElements.define('spotify-status-manager', SpotifyStatusManager);
+}
+if (!customElements.get('x-spotify-status-manager')) {
+  customElements.define('x-spotify-status-manager', SpotifyStatusManager);
+}
