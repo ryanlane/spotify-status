@@ -339,7 +339,13 @@ class SpotifyStatusManager extends HTMLElement {
         })
       });
 
-      const data = await response.json();
+      const raw = await response.json();
+      // Some gateway layers may wrap the payload inside an "image" field (observed case: { image: { success: true, ... } })
+      let data = raw;
+      if (!('success' in data) && data.image && typeof data.image === 'object' && 'success' in data.image) {
+        console.debug('[SpotifyStatusManager] Detected nested image payload wrapper; flattening');
+        data = data.image;
+      }
 
       if (data.success) {
         const mime = data.format === 'png' ? 'image/png' : 'image/jpeg';
@@ -358,7 +364,7 @@ class SpotifyStatusManager extends HTMLElement {
         if (data.reason) detail.push(`reason=${data.reason}`);
         if (data.steps) detail.push(`steps=${data.steps.join('>')}`);
         this.setState({ error: `Failed to generate image: ${data.error || data.message || 'Unknown error'}${detail.length ? ' (' + detail.join(', ') + ')' : ''}` });
-        console.warn('Spotify image generation failure payload', data);
+        console.warn('Spotify image generation failure payload', { raw, flattened: data });
       }
     } catch (error) {
       console.error('Failed to generate image:', error);
