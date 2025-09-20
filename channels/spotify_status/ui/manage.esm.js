@@ -329,6 +329,7 @@ class SpotifyStatusManager extends HTMLElement {
 
   async generateImage() {
     try {
+      this.setState({ error: null, generating: true });
       const response = await fetch(`${this.apiBaseUrl}/api/channels/com.spotify.status/request_image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -341,22 +342,30 @@ class SpotifyStatusManager extends HTMLElement {
       const data = await response.json();
 
       if (data.success) {
-        // Open image in new window
+        const mime = data.format === 'png' ? 'image/png' : 'image/jpeg';
         const imageWindow = window.open('', '_blank');
         imageWindow.document.write(`
           <html>
             <head><title>Spotify Status Image</title></head>
-            <body style="margin:0; background:#000; display:flex; align-items:center; justify-content:center;">
-              <img src="data:image/jpeg;base64,${data.image}" style="max-width:100%; max-height:100%;">
+            <body style="margin:0; background:#000; display:flex; flex-direction:column; align-items:center; justify-content:center; font-family:system-ui; color:#fff;">
+              <div style="position:fixed; top:8px; left:12px; font-size:12px; opacity:0.7;">${mime.toUpperCase()} ${data.width}x${data.height}</div>
+              <img src="data:${mime};base64,${data.image}" style="max-width:100%; max-height:100%; object-fit:contain;">
             </body>
           </html>
         `);
       } else {
-        this.setState({ error: `Failed to generate image: ${data.error || 'Unknown error'}` });
+        const detail = [];
+        if (data.reason) detail.push(`reason=${data.reason}`);
+        if (data.steps) detail.push(`steps=${data.steps.join('>')}`);
+        this.setState({ error: `Failed to generate image: ${data.error || data.message || 'Unknown error'}${detail.length ? ' (' + detail.join(', ') + ')' : ''}` });
+        console.warn('Spotify image generation failure payload', data);
       }
     } catch (error) {
       console.error('Failed to generate image:', error);
       this.setState({ error: 'Failed to generate image. Please try again.' });
+    } finally {
+      // Clear generating state
+      this.setState({ generating: false });
     }
   }
 

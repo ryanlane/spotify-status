@@ -469,61 +469,82 @@ class SpotifyStatusChannel:
     
     async def request_image(self, request_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """Generate current track album art image"""
+        steps: list[str] = []
+        reason: Optional[str] = None
         try:
-            # Parse display options
+            steps.append("parse_options")
             options = request_data.get("options", {}) if request_data else {}
-            width = options.get("width", 800)
-            height = options.get("height", 480)
+            width = int(options.get("width", 800) or 800)
+            height = int(options.get("height", 480) or 480)
             spotify_cfg = self.config.get("spotify", {})
             if not (spotify_cfg.get("client_id") and spotify_cfg.get("client_secret")):
+                reason = "not_configured"
                 return {
                     "success": False,
-                    "error": "not_configured",
-                    "message": "Spotify credentials not configured",
+                    "error": "Spotify credentials not configured",
+                    "reason": reason,
+                    "steps": steps,
                 }
             if not self.spotify_client:
+                reason = "not_authorized"
                 return {
                     "success": False,
-                    "error": "not_authorized",
-                    "message": "Spotify not authorized. Complete OAuth flow.",
+                    "error": "Spotify not authorized. Complete OAuth flow.",
+                    "reason": reason,
+                    "steps": steps,
                 }
-            
-            # Get current track
+
+            steps.append("get_current_track")
             track_info = self.get_current_track()
-            
+            steps.append("choose_template")
             if track_info:
-                # Create status image with album art
+                steps.append("create_status_image")
                 image = self.create_status_image(track_info, width, height)
                 track_name = track_info.get('name', 'Unknown Track')
                 artist = track_info.get('artist', 'Unknown Artist')
                 description = f"Now playing: {track_name} by {artist}"
             else:
-                # Create "no music playing" image
+                steps.append("create_no_music_image")
                 image = self.create_no_music_image(width, height)
                 description = "No music currently playing on Spotify"
-            
-            # Convert to base64
+
+            steps.append("encode_jpeg")
             buffer = io.BytesIO()
-            image.save(buffer, format='JPEG', quality=95)
+            try:
+                image.save(buffer, format='JPEG', quality=95)
+                out_format = 'jpeg'
+            except Exception as jpeg_err:  # noqa: BLE001
+                # Fallback to PNG (environment may lack JPEG encoder)
+                logger.warning("JPEG encode failed (%s); falling back to PNG", jpeg_err)
+                steps.append("jpeg_fallback_png")
+                buffer = io.BytesIO()
+                image.save(buffer, format='PNG')
+                out_format = 'png'
+
             image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            
+            steps.append("return_success")
+
             return {
                 "success": True,
                 "image": image_base64,
-                "format": "jpeg",
+                "format": out_format,
                 "width": width,
                 "height": height,
                 "description": description,
                 "track_info": track_info,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "steps": steps,
             }
-            
-        except Exception as e:
-            logger.error(f"Failed to generate image: {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[SpotifyStatusChannel] Failed to generate image at step %s: %s", steps[-1] if steps else 'start', e)
+            reason = reason or "generation_error"
             return {
                 "success": False,
-                "error": str(e),
-                "message": f"Failed to generate Spotify status image: {str(e)}"
+                "error": str(e) or "unknown",
+                "reason": reason,
+                "message": "Failed to generate Spotify status image",
+                "steps": steps,
+                "exception_type": type(e).__name__,
             }
     
     def get_status(self) -> Dict[str, Any]:
