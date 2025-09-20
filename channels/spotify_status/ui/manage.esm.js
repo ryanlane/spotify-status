@@ -40,7 +40,8 @@ class SpotifyStatusManager extends HTMLElement {
       const data = await resp.json();
       if (data.success) {
         const s = data.settings || {};
-        const defaultRedirect = `${this.apiBaseUrl}/api/channels/com.spotify.status/callback`;
+  // Canonical local redirect (force 127.0.0.1 to avoid host variance like 'oak' or 'localhost')
+  const defaultRedirect = `http://127.0.0.1:5000/api/channels/com.spotify.status/callback`;
         this.setState({
           configured: !!s.configured,
           authorized: !!s.authorized,

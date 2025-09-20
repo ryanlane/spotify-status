@@ -95,14 +95,14 @@ class SpotifyStatusChannel:
                 base_spotify_cfg = self.config.get("spotify", {}) or {}
                 persisted_spotify_cfg = persisted.get("spotify", {}) or {}
                 merged = {**persisted_spotify_cfg, **base_spotify_cfg}
-                # Auto-upgrade legacy redirect URI port 8080 -> 5000 if unchanged by user
-                legacy_redirect = "http://localhost:8080/api/channels/com.spotify.status/callback"
-                new_redirect = "http://localhost:5000/api/channels/com.spotify.status/callback"
-                if (
-                    merged.get("redirect_uri") == legacy_redirect
-                    or merged.get("redirect_uri") is None
-                ):
-                    merged["redirect_uri"] = new_redirect
+                # Auto-upgrade legacy redirect URIs to new canonical host 127.0.0.1:5000
+                legacy_redirects = {
+                    "http://localhost:8080/api/channels/com.spotify.status/callback",
+                    "http://localhost:5000/api/channels/com.spotify.status/callback",
+                }
+                canonical_redirect = "http://127.0.0.1:5000/api/channels/com.spotify.status/callback"
+                if merged.get("redirect_uri") in legacy_redirects or merged.get("redirect_uri") is None:
+                    merged["redirect_uri"] = canonical_redirect
                 self.config["spotify"] = merged
             else:
                 # Persist initial scaffold so subsequent restarts retain structure
@@ -153,7 +153,7 @@ class SpotifyStatusChannel:
             # New default redirect URI path (versioned change from legacy /callback root)
             redirect_uri = spotify_config.get(
                 "redirect_uri",
-                "http://localhost:5000/api/channels/com.spotify.status/callback",
+                "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
             )
             
             if not client_id or not client_secret:
@@ -399,7 +399,7 @@ class SpotifyStatusChannel:
                     "authorized": authorized,
                     "redirect_uri": spotify_cfg.get(
                         "redirect_uri",
-                        "http://localhost:5000/api/channels/com.spotify.status/callback",
+                        "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
                     ),
                     "client_id_present": bool(spotify_cfg.get("client_id")),
                     # Never expose secret value (only presence)
@@ -538,7 +538,7 @@ class SpotifyStatusChannel:
                 "client_secret": ("***" + cfg.get("client_secret", "")[-4:]) if cfg.get("client_secret") else None,
                 "redirect_uri": cfg.get(
                     "redirect_uri",
-                    "http://localhost:5000/api/channels/com.spotify.status/callback",
+                    "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
                 ),
                 "configured": bool(cfg.get("client_id") and cfg.get("client_secret")),
                 "authorized": bool(self.spotify_client),
@@ -569,7 +569,7 @@ class SpotifyStatusChannel:
             client_secret = cfg.get("client_secret")
             redirect_uri = cfg.get(
                 "redirect_uri",
-                "http://localhost:5000/api/channels/com.spotify.status/callback",
+                "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
             )
             if not client_id or not client_secret:
                 raise HTTPException(status_code=400, detail="Spotify client_id and client_secret must be configured first")
@@ -616,37 +616,68 @@ class SpotifyStatusChannel:
                 cfg = self.config.get("spotify", {})
                 client_id = cfg.get("client_id")
                 client_secret = cfg.get("client_secret")
+                # Primary (stored) redirect URI
                 redirect_uri = cfg.get(
                     "redirect_uri",
-                    "http://localhost:5000/api/channels/com.spotify.status/callback",
+                    "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
                 )
+                # Fallback legacy/canonical variants we are willing to attempt if initial exchange
+                # fails with redirect mismatch related errors.
+                redirect_fallbacks = [
+                    redirect_uri,
+                    # legacy localhost variants
+                    "http://localhost:5000/api/channels/com.spotify.status/callback",
+                    "http://localhost:8080/api/channels/com.spotify.status/callback",
+                    # host-only variant sometimes entered by user
+                    "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
+                ]
+                # De-duplicate while preserving order
+                seen = set()
+                redirect_fallbacks = [r for r in redirect_fallbacks if not (r in seen or seen.add(r))]
                 scope = "user-read-currently-playing user-read-playback-state"
                 if not (client_id and client_secret):
                     raise HTTPException(status_code=400, detail="Client credentials not configured")
-                auth_manager = SpotifyOAuth(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    redirect_uri=redirect_uri,
-                    scope=scope,
-                    cache_path=str(self.token_path)
-                )
-                # Exchange code for token
-                try:
-                    token_info = auth_manager.get_access_token(code)  # type: ignore[arg-type]
-                except TypeError:
-                    # Some versions require arg name code
-                    token_info = auth_manager.get_access_token(code=code)  # type: ignore[call-arg]
-                if not token_info or 'access_token' not in token_info:
-                    raise HTTPException(status_code=500, detail="Failed to obtain access token from Spotify")
-                self.token_info = token_info
-                self.spotify_client = spotipy.Spotify(auth_manager=auth_manager)
-                logger.info("Spotify authorization completed; token expires at %s", token_info.get('expires_at'))
-                return JSONResponse({
-                    "success": True,
-                    "message": "Spotify authorized",
-                    "connected": True,
-                    "expires_at": token_info.get('expires_at')
-                })
+                last_error: Optional[str] = None
+                for attempt_idx, attempted_redirect in enumerate(redirect_fallbacks, start=1):
+                    try:
+                        auth_manager = SpotifyOAuth(
+                            client_id=client_id,
+                            client_secret=client_secret,
+                            redirect_uri=attempted_redirect,
+                            scope=scope,
+                            cache_path=str(self.token_path)
+                        )
+                        try:
+                            token_info = auth_manager.get_access_token(code)  # type: ignore[arg-type]
+                        except TypeError:
+                            token_info = auth_manager.get_access_token(code=code)  # type: ignore[call-arg]
+                        if token_info and token_info.get('access_token'):
+                            # Success: persist canonical redirect if it differs
+                            if attempted_redirect != cfg.get("redirect_uri"):
+                                cfg["redirect_uri"] = attempted_redirect
+                                self._save_settings(self.config)
+                            self.token_info = token_info
+                            self.spotify_client = spotipy.Spotify(auth_manager=auth_manager)
+                            logger.info(
+                                "Spotify authorization completed on attempt %d using redirect %s; token expires at %s",
+                                attempt_idx,
+                                attempted_redirect,
+                                token_info.get('expires_at'),
+                            )
+                            return JSONResponse({
+                                "success": True,
+                                "message": "Spotify authorized",
+                                "connected": True,
+                                "redirect_used": attempted_redirect,
+                                "attempts": attempt_idx,
+                                "expires_at": token_info.get('expires_at')
+                            })
+                        last_error = "Missing access token in response"
+                    except Exception as ex:  # noqa: BLE001
+                        last_error = str(ex)
+                        # Continue to next fallback
+                        continue
+                raise HTTPException(status_code=500, detail=f"Auth callback failed after trying {len(redirect_fallbacks)} redirect(s): {last_error}")
             except HTTPException:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -677,6 +708,26 @@ class SpotifyStatusChannel:
                 "authorized": self.spotify_client is not None,
                 "degraded": self.degraded,
                 "token_expires_at": (self.token_info or {}).get('expires_at') if self.token_info else None
+            })
+
+        @router.get("/authorize/redirects")
+        async def authorize_redirects():  # noqa: D401
+            cfg = self.config.get("spotify", {})
+            current = cfg.get("redirect_uri")
+            candidates = [
+                current,
+                "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
+                "http://localhost:5000/api/channels/com.spotify.status/callback",
+                "http://localhost:8080/api/channels/com.spotify.status/callback",
+            ]
+            # Deduplicate
+            seen = set()
+            ordered = [c for c in candidates if c and not (c in seen or seen.add(c))]
+            return JSONResponse({
+                "success": True,
+                "current": current,
+                "candidates": ordered,
+                "note": "Order reflects fallback attempt priority in callback handler"
             })
 
         # ---------------- Core Channel Contract Endpoints (for API docs visibility) -----------------
