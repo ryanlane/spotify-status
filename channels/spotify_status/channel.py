@@ -142,7 +142,11 @@ class SpotifyStatusChannel:
             spotify_config = self.config.get("spotify", {})
             client_id = spotify_config.get("client_id")
             client_secret = spotify_config.get("client_secret")
-            redirect_uri = spotify_config.get("redirect_uri", "http://localhost:8080/callback")
+            # New default redirect URI path (versioned change from legacy /callback root)
+            redirect_uri = spotify_config.get(
+                "redirect_uri",
+                "http://localhost:8080/api/channels/com.spotify.status/callback",
+            )
             
             if not client_id or not client_secret:
                 logger.error("Spotify client_id and client_secret required in config")
@@ -385,7 +389,10 @@ class SpotifyStatusChannel:
                 "configuration": {
                     "configured": configured,
                     "authorized": authorized,
-                    "redirect_uri": spotify_cfg.get("redirect_uri", "http://localhost:8080/callback"),
+                    "redirect_uri": spotify_cfg.get(
+                        "redirect_uri",
+                        "http://localhost:8080/api/channels/com.spotify.status/callback",
+                    ),
                     "client_id_present": bool(spotify_cfg.get("client_id")),
                     # Never expose secret value (only presence)
                     "client_secret_present": bool(spotify_cfg.get("client_secret")),
@@ -521,7 +528,10 @@ class SpotifyStatusChannel:
                 "client_id": cfg.get("client_id"),
                 # Mask secret fully except last 4 chars
                 "client_secret": ("***" + cfg.get("client_secret", "")[-4:]) if cfg.get("client_secret") else None,
-                "redirect_uri": cfg.get("redirect_uri", "http://localhost:8080/callback"),
+                "redirect_uri": cfg.get(
+                    "redirect_uri",
+                    "http://localhost:8080/api/channels/com.spotify.status/callback",
+                ),
                 "configured": bool(cfg.get("client_id") and cfg.get("client_secret")),
                 "authorized": bool(self.spotify_client),
                 "market": cfg.get("market"),
@@ -549,7 +559,10 @@ class SpotifyStatusChannel:
             cfg = self.config.get("spotify", {})
             client_id = cfg.get("client_id")
             client_secret = cfg.get("client_secret")
-            redirect_uri = cfg.get("redirect_uri", "http://localhost:8080/callback")
+            redirect_uri = cfg.get(
+                "redirect_uri",
+                "http://localhost:8080/api/channels/com.spotify.status/callback",
+            )
             if not client_id or not client_secret:
                 raise HTTPException(status_code=400, detail="Spotify client_id and client_secret must be configured first")
             scope = "user-read-currently-playing user-read-playback-state"
@@ -595,7 +608,10 @@ class SpotifyStatusChannel:
                 cfg = self.config.get("spotify", {})
                 client_id = cfg.get("client_id")
                 client_secret = cfg.get("client_secret")
-                redirect_uri = cfg.get("redirect_uri", "http://localhost:8080/callback")
+                redirect_uri = cfg.get(
+                    "redirect_uri",
+                    "http://localhost:8080/api/channels/com.spotify.status/callback",
+                )
                 scope = "user-read-currently-playing user-read-playback-state"
                 if not (client_id and client_secret):
                     raise HTTPException(status_code=400, detail="Client credentials not configured")
@@ -629,12 +645,22 @@ class SpotifyStatusChannel:
                 raise HTTPException(status_code=500, detail=f"Auth callback failed: {str(e)}")
 
         # Support both GET and POST for callback (Spotify typically uses GET redirect)
+        # Primary (new) callback endpoint (preferred)
+        @router.get("/callback")
+        async def spotify_auth_callback_new_get(request: Request):  # noqa: D401
+            return await _handle_auth_callback(request)
+
+        @router.post("/callback")
+        async def spotify_auth_callback_new_post(request: Request):  # noqa: D401
+            return await _handle_auth_callback(request)
+
+        # Backward compatibility with earlier implementation using /auth/callback
         @router.get("/auth/callback")
-        async def spotify_auth_callback_get(request: Request):  # noqa: D401
+        async def spotify_auth_callback_legacy_get(request: Request):  # noqa: D401
             return await _handle_auth_callback(request)
 
         @router.post("/auth/callback")
-        async def spotify_auth_callback_post(request: Request):  # noqa: D401
+        async def spotify_auth_callback_legacy_post(request: Request):  # noqa: D401
             return await _handle_auth_callback(request)
 
         @router.get("/authorize/status")

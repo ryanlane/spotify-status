@@ -40,12 +40,13 @@ class SpotifyStatusManager extends HTMLElement {
       const data = await resp.json();
       if (data.success) {
         const s = data.settings || {};
+        const defaultRedirect = `${this.apiBaseUrl}/api/channels/com.spotify.status/callback`;
         this.setState({
           configured: !!s.configured,
           authorized: !!s.authorized,
           clientId: s.client_id || '',
-            // secret masked; leave blank
-          redirectUri: s.redirect_uri || 'http://localhost:8080/callback'
+          // secret masked; always blank for security on load
+          redirectUri: s.redirect_uri || defaultRedirect
         });
       }
     } catch (e) {
