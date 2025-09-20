@@ -95,6 +95,14 @@ class SpotifyStatusChannel:
                 base_spotify_cfg = self.config.get("spotify", {}) or {}
                 persisted_spotify_cfg = persisted.get("spotify", {}) or {}
                 merged = {**persisted_spotify_cfg, **base_spotify_cfg}
+                # Auto-upgrade legacy redirect URI port 8080 -> 5000 if unchanged by user
+                legacy_redirect = "http://localhost:8080/api/channels/com.spotify.status/callback"
+                new_redirect = "http://localhost:5000/api/channels/com.spotify.status/callback"
+                if (
+                    merged.get("redirect_uri") == legacy_redirect
+                    or merged.get("redirect_uri") is None
+                ):
+                    merged["redirect_uri"] = new_redirect
                 self.config["spotify"] = merged
             else:
                 # Persist initial scaffold so subsequent restarts retain structure
@@ -145,7 +153,7 @@ class SpotifyStatusChannel:
             # New default redirect URI path (versioned change from legacy /callback root)
             redirect_uri = spotify_config.get(
                 "redirect_uri",
-                "http://localhost:8080/api/channels/com.spotify.status/callback",
+                "http://localhost:5000/api/channels/com.spotify.status/callback",
             )
             
             if not client_id or not client_secret:
@@ -391,7 +399,7 @@ class SpotifyStatusChannel:
                     "authorized": authorized,
                     "redirect_uri": spotify_cfg.get(
                         "redirect_uri",
-                        "http://localhost:8080/api/channels/com.spotify.status/callback",
+                        "http://localhost:5000/api/channels/com.spotify.status/callback",
                     ),
                     "client_id_present": bool(spotify_cfg.get("client_id")),
                     # Never expose secret value (only presence)
@@ -530,7 +538,7 @@ class SpotifyStatusChannel:
                 "client_secret": ("***" + cfg.get("client_secret", "")[-4:]) if cfg.get("client_secret") else None,
                 "redirect_uri": cfg.get(
                     "redirect_uri",
-                    "http://localhost:8080/api/channels/com.spotify.status/callback",
+                    "http://localhost:5000/api/channels/com.spotify.status/callback",
                 ),
                 "configured": bool(cfg.get("client_id") and cfg.get("client_secret")),
                 "authorized": bool(self.spotify_client),
@@ -561,7 +569,7 @@ class SpotifyStatusChannel:
             client_secret = cfg.get("client_secret")
             redirect_uri = cfg.get(
                 "redirect_uri",
-                "http://localhost:8080/api/channels/com.spotify.status/callback",
+                "http://localhost:5000/api/channels/com.spotify.status/callback",
             )
             if not client_id or not client_secret:
                 raise HTTPException(status_code=400, detail="Spotify client_id and client_secret must be configured first")
@@ -610,7 +618,7 @@ class SpotifyStatusChannel:
                 client_secret = cfg.get("client_secret")
                 redirect_uri = cfg.get(
                     "redirect_uri",
-                    "http://localhost:8080/api/channels/com.spotify.status/callback",
+                    "http://localhost:5000/api/channels/com.spotify.status/callback",
                 )
                 scope = "user-read-currently-playing user-read-playback-state"
                 if not (client_id and client_secret):
