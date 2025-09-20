@@ -279,7 +279,12 @@ class SpotifyStatusChannel:
             # No album art, show large text
             text_y = 50
             draw.rectangle([width//4, 50, 3*width//4, height//2], fill='lightgray', outline='black')
-            draw.text((width//2, height//4), "♪", font=None, anchor="mm", fill='black')
+            try:
+                draw.text((width//2, height//4), "♪", anchor="mm", fill='black')
+            except Exception:
+                # Fallback without anchor parameter for older Pillow
+                w_note, h_note = draw.textlength("♪"), 16
+                draw.text((width//2 - int(w_note/2), height//4 - int(h_note/2)), "♪", fill='black')
         
         # Add track information
         try:
@@ -297,19 +302,33 @@ class SpotifyStatusChannel:
         track_name = track_info.get('name', 'Unknown Track')
         if len(track_name) > 30:
             track_name = track_name[:27] + "..."
-        draw.text((width//2, text_y), track_name, font=font_large, anchor="mt", fill='black')
+        try:
+            draw.text((width//2, text_y), track_name, font=font_large, anchor="mt", fill='black')
+        except Exception:
+            tw = draw.textlength(track_name, font=font_large)
+            draw.text((width//2 - int(tw/2), text_y), track_name, font=font_large, fill='black')
         
         # Artist name
         artist_name = track_info.get('artist', 'Unknown Artist')
         if len(artist_name) > 40:
             artist_name = artist_name[:37] + "..."
-        draw.text((width//2, text_y + 35), f"by {artist_name}", font=font_medium, anchor="mt", fill='gray')
+        try:
+            draw.text((width//2, text_y + 35), f"by {artist_name}", font=font_medium, anchor="mt", fill='gray')
+        except Exception:
+            by_line = f"by {artist_name}"
+            tw = draw.textlength(by_line, font=font_medium)
+            draw.text((width//2 - int(tw/2), text_y + 35), by_line, font=font_medium, fill='gray')
         
         # Album name
         album_name = track_info.get('album', 'Unknown Album')
         if len(album_name) > 40:
             album_name = album_name[:37] + "..."
-        draw.text((width//2, text_y + 65), f"from {album_name}", font=font_small, anchor="mt", fill='gray')
+        try:
+            draw.text((width//2, text_y + 65), f"from {album_name}", font=font_small, anchor="mt", fill='gray')
+        except Exception:
+            from_line = f"from {album_name}"
+            tw = draw.textlength(from_line, font=font_small)
+            draw.text((width//2 - int(tw/2), text_y + 65), from_line, font=font_small, fill='gray')
         
         # Progress bar
         if track_info.get('progress_ms') and track_info.get('duration_ms'):
@@ -334,7 +353,12 @@ class SpotifyStatusChannel:
         
         # Device info
         device = track_info.get('device', 'Unknown Device')
-        draw.text((width//2, height - 30), f"Playing on {device}", font=font_small, anchor="mt", fill='gray')
+        try:
+            draw.text((width//2, height - 30), f"Playing on {device}", font=font_small, anchor="mt", fill='gray')
+        except Exception:
+            line = f"Playing on {device}"
+            tw = draw.textlength(line, font=font_small)
+            draw.text((width//2 - int(tw/2), height - 30), line, font=font_small, fill='gray')
         
         return image
     
@@ -351,9 +375,16 @@ class SpotifyStatusChannel:
             font_medium = ImageFont.load_default()
         
         # Draw large music note
-        draw.text((width//2, height//2 - 50), "♪", font=font_large, anchor="mm", fill='lightgray')
-        draw.text((width//2, height//2 + 20), "No music playing", font=font_medium, anchor="mm", fill='gray')
-        draw.text((width//2, height//2 + 50), "Start playing on Spotify", font=font_medium, anchor="mm", fill='lightgray')
+        def center_line(y, text, font, fill):
+            try:
+                draw.text((width//2, y), text, font=font, anchor="mm", fill=fill)
+            except Exception:
+                tw = draw.textlength(text, font=font)
+                th = 16
+                draw.text((width//2 - int(tw/2), y - int(th/2)), text, font=font, fill=fill)
+        center_line(height//2 - 50, "♪", font_large, 'lightgray')
+        center_line(height//2 + 20, "No music playing", font_medium, 'gray')
+        center_line(height//2 + 50, "Start playing on Spotify", font_medium, 'lightgray')
         
         return image
     
