@@ -213,10 +213,15 @@ class SpotifyStatusChannel:
                         cleaned.append(t)
                 additional_types = ",".join(cleaned) if cleaned else None
             current_track = self.spotify_client.current_playback(market=market, additional_types=additional_types)
-            
-            if not current_track or not current_track.get('is_playing'):
+
+            if not current_track or not current_track.get('item'):
                 return None
-            
+
+            # We'll surface paused tracks too (so album art still renders). Distinguish with paused flag.
+            is_playing = bool(current_track.get('is_playing'))
+            if not is_playing:
+                logger.debug("[SpotifyStatusChannel] Playback paused; returning last track metadata for display")
+
             track_info = {
                 "name": current_track['item']['name'],
                 "artist": ", ".join([artist['name'] for artist in current_track['item']['artists']]),
@@ -224,7 +229,8 @@ class SpotifyStatusChannel:
                 "album_art_url": current_track['item']['album']['images'][0]['url'] if current_track['item']['album']['images'] else None,
                 "progress_ms": current_track.get('progress_ms', 0),
                 "duration_ms": current_track['item']['duration_ms'],
-                "is_playing": current_track['is_playing'],
+                "is_playing": is_playing,
+                "paused": (not is_playing),
                 "device": current_track['device']['name'] if current_track.get('device') else "Unknown"
             }
             
