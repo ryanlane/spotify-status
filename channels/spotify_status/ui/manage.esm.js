@@ -8,7 +8,14 @@ class SpotifyStatusManager extends HTMLElement {
       currentTrack: null,
       isConnected: false,
       isLoading: true,
-      error: null
+      error: null,
+      // settings related
+      configured: false,
+      authorized: false,
+      clientId: '',
+      clientSecret: '',
+      redirectUri: '',
+      saving: false
     };
 
     this.apiBaseUrl = this.getApiBaseUrl();
@@ -19,9 +26,62 @@ class SpotifyStatusManager extends HTMLElement {
   }
 
   async connectedCallback() {
-    await this.loadStatus();
+    await this.loadSettings();
+    if (this.state.configured) {
+      await this.loadStatus();
+      this.startAutoRefresh();
+    }
     this.render();
-    this.startAutoRefresh();
+  }
+
+  async loadSettings() {
+    try {
+      const resp = await fetch(`${this.apiBaseUrl}/api/channels/com.spotify.status/settings`, { credentials: 'include' });
+      const data = await resp.json();
+      if (data.success) {
+        const s = data.settings || {};
+        this.setState({
+          configured: !!s.configured,
+          authorized: !!s.authorized,
+          clientId: s.client_id || '',
+            // secret masked; leave blank
+          redirectUri: s.redirect_uri || 'http://localhost:8080/callback'
+        });
+      }
+    } catch (e) {
+      console.warn('Failed to load settings', e);
+    }
+  }
+
+  async saveSettings() {
+    try {
+      this.setState({ saving: true, error: null });
+      const body = {
+        client_id: this.state.clientId.trim(),
+        client_secret: this.state.clientSecret.trim(),
+        redirect_uri: this.state.redirectUri.trim()
+      };
+      const resp = await fetch(`${this.apiBaseUrl}/api/channels/com.spotify.status/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json();
+      if (data.success) {
+        await this.loadSettings();
+        if (this.state.configured) {
+          await this.loadStatus();
+          this.startAutoRefresh();
+        }
+      } else {
+        this.setState({ error: 'Failed to save settings' });
+      }
+    } catch (e) {
+      this.setState({ error: 'Save failed: ' + e });
+    } finally {
+      this.setState({ saving: false });
+    }
   }
 
   async loadStatus() {
@@ -63,162 +123,167 @@ class SpotifyStatusManager extends HTMLElement {
   }
 
   render() {
+    // First-run configuration form
+    if (!this.state.configured) {
+      this.shadowRoot.innerHTML = `
+        <style>${this.formStyles()}</style>
+        <div class="container">
+          <div class="card">
+            <div class="header">
+              <h1>🎵 Spotify Status</h1>
+              <p>Enter your Spotify API credentials to get started</p>
+            </div>
+            <form id="config-form">
+              <label>
+                <span>Client ID</span>
+                <input type="text" id="client-id" value="${this.escapeHtml(this.state.clientId)}" placeholder="sp_client_id" required />
+              </label>
+              <label>
+                <span>Client Secret</span>
+                <input type="password" id="client-secret" value="" placeholder="sp_client_secret" ${this.state.clientId? '' : 'required'} />
+              </label>
+              <label>
+                <span>Redirect URI</span>
+                <input type="text" id="redirect-uri" value="${this.escapeHtml(this.state.redirectUri)}" />
+              </label>
+              <div class="actions">
+                <button type="submit" class="btn" ${this.state.saving? 'disabled' : ''}>${this.state.saving? 'Saving...' : 'Save Settings'}</button>
+              </div>
+              ${this.state.error ? `<div class="error">${this.escapeHtml(this.state.error)}</div>` : ''}
+              <div class="help">
+                After saving, you'll authorize the channel with your Spotify account.
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+      this.attachConfigHandlers();
+      return;
+    }
+
+    // Existing status UI once configured
     this.shadowRoot.innerHTML = `
       <style>
-        :host {
-          display: block;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        }
-        .container {
-          max-width: 600px;
-          margin: 0 auto;
-          padding: 24px;
-        }
-        .card {
-          background: white;
-          border-radius: 12px;
-          padding: 32px;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        }
-        .header {
-          text-align: center;
-          margin-bottom: 32px;
-        }
-        .header h1 {
-          color: #1db954;
-          margin: 0 0 8px 0;
-        }
-        .status {
-          display: flex;
-          align-items: center;
-          margin-bottom: 24px;
-          padding: 16px;
-          background: #f8f9fa;
-          border-radius: 8px;
-        }
-        .status-dot {
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          margin-right: 12px;
-        }
-        .status-dot.connected { background: #1db954; }
-        .status-dot.disconnected { background: #dc3545; }
-        .track-info {
-          background: ${this.state.currentTrack ? '#f0fdf4' : '#f8f9fa'};
-          border: 1px solid ${this.state.currentTrack ? '#1db954' : '#dee2e6'};
-          border-radius: 8px;
-          padding: 20px;
-          margin-bottom: 24px;
-        }
-        .track-title {
-          font-size: 1.2rem;
-          font-weight: 600;
-          margin-bottom: 8px;
-          color: #212529;
-        }
-        .track-artist {
-          color: #6c757d;
-          margin-bottom: 4px;
-        }
-        .track-album {
-          color: #9ca3af;
-          font-size: 0.9rem;
-          margin-bottom: 12px;
-        }
-        .progress-bar {
-          width: 100%;
-          height: 4px;
-          background: #e9ecef;
-          border-radius: 2px;
-          margin: 12px 0;
-          overflow: hidden;
-        }
-        .progress-fill {
-          height: 100%;
-          background: #1db954;
-          transition: width 1s linear;
-        }
-        .time-info {
-          display: flex;
-          justify-content: space-between;
-          font-size: 0.8rem;
-          color: #6c757d;
-        }
-        .controls {
-          display: flex;
-          gap: 12px;
-          justify-content: center;
-        }
-        .btn {
-          background: #1db954;
-          color: white;
-          border: none;
-          border-radius: 6px;
-          padding: 10px 20px;
-          cursor: pointer;
-          font-size: 0.9rem;
-          transition: background 0.2s;
-        }
-        .btn:hover {
-          background: #1ed760;
-        }
-        .btn-secondary {
-          background: #6c757d;
-        }
-        .btn-secondary:hover {
-          background: #5a6268;
-        }
-        .loading {
-          text-align: center;
-          padding: 40px;
-          color: #6c757d;
-        }
-        .error {
-          background: #f8d7da;
-          border: 1px solid #f5c6cb;
-          color: #721c24;
-          padding: 16px;
-          border-radius: 8px;
-          margin-top: 16px;
-        }
+        :host {display:block;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+        .container {max-width:600px;margin:0 auto;padding:24px;}
+        .card {background:#fff;border-radius:12px;padding:32px;box-shadow:0 4px 12px rgba(0,0,0,0.1);} 
+        .header {text-align:center;margin-bottom:32px;} 
+        .header h1 {color:#1db954;margin:0 0 8px;} 
+        .status {display:flex;align-items:center;margin-bottom:24px;padding:16px;background:#f8f9fa;border-radius:8px;} 
+        .status-dot {width:12px;height:12px;border-radius:50%;margin-right:12px;} 
+        .status-dot.connected {background:#1db954;} 
+        .status-dot.disconnected {background:#dc3545;} 
+        .track-info {background:${this.state.currentTrack ? '#f0fdf4' : '#f8f9fa'};border:1px solid ${this.state.currentTrack ? '#1db954' : '#dee2e6'};border-radius:8px;padding:20px;margin-bottom:24px;} 
+        .track-title {font-size:1.2rem;font-weight:600;margin-bottom:8px;color:#212529;} 
+        .track-artist {color:#6c757d;margin-bottom:4px;} 
+        .track-album {color:#9ca3af;font-size:.9rem;margin-bottom:12px;} 
+        .progress-bar {width:100%;height:4px;background:#e9ecef;border-radius:2px;margin:12px 0;overflow:hidden;} 
+        .progress-fill {height:100%;background:#1db954;transition:width 1s linear;} 
+        .time-info {display:flex;justify-content:space-between;font-size:.8rem;color:#6c757d;} 
+        .controls {display:flex;gap:12px;justify-content:center;} 
+        .btn {background:#1db954;color:#fff;border:none;border-radius:6px;padding:10px 20px;cursor:pointer;font-size:.9rem;transition:background .2s;} 
+        .btn:hover {background:#1ed760;} 
+        .btn-secondary {background:#6c757d;} .btn-secondary:hover {background:#5a6268;} 
+        .loading {text-align:center;padding:40px;color:#6c757d;} 
+        .error {background:#f8d7da;border:1px solid #f5c6cb;color:#721c24;padding:16px;border-radius:8px;margin-top:16px;} 
+        .auth-warning {background:#fff3cd;border:1px solid #ffeeba;color:#856404;padding:12px;border-radius:8px;margin-bottom:16px;font-size:.85rem;} 
       </style>
-      
       <div class="container">
         <div class="card">
           <div class="header">
             <h1>🎵 Spotify Status</h1>
             <p>Monitor your currently playing track</p>
           </div>
-          
-          ${this.state.isLoading ? `
-            <div class="loading">
-              <h3>Loading Spotify status...</h3>
-            </div>
-          ` : `
+          ${!this.state.authorized ? `<div class="auth-warning">Credentials saved. Authorize with Spotify to enable live status.<br/><button id="authorize-btn" class="btn" style="margin-top:8px;">Authorize Spotify</button></div>` : ''}
+          ${this.state.isLoading ? `<div class="loading"><h3>Loading Spotify status...</h3></div>` : `
             <div class="status">
               <div class="status-dot ${this.state.isConnected ? 'connected' : 'disconnected'}"></div>
               <span>${this.getStatusText()}</span>
             </div>
-            
-            <div class="track-info">
-              ${this.renderTrackInfo()}
-            </div>
-            
+            <div class="track-info">${this.renderTrackInfo()}</div>
             <div class="controls">
               <button class="btn" id="refresh-btn">🔄 Refresh</button>
               <button class="btn" id="generate-btn">🖼️ Generate Image</button>
             </div>
-            
-            ${this.state.error ? `
-              <div class="error">${this.state.error}</div>
-            ` : ''}
+            ${this.state.error ? `<div class="error">${this.state.error}</div>` : ''}
+            ${!this.state.isConnected ? `<div class="error">Unable to connect to Spotify. Please check your settings and network connection.</div>` : ''}
+            ${this.state.currentTrack ? '' : `<div class="error">No track is currently playing. Start a track in Spotify to see the status here.</div>`}
           `}
+          ${!this.state.authorized && !this.state.isLoading ? `
+            <div class="degraded-mode">
+              <div class="error" style="margin-top: 16px;">
+                ⚠️ Live status not available. Please authorize the app with Spotify.
+              </div>
+            </div>
+          ` : ''}
         </div>
-      </div>
-    `;
-
+      </div>`;
     this.attachEventListeners();
+  }
+
+  formStyles() {
+    return `:host{display:block;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;} .container{max-width:640px;margin:0 auto;padding:32px;} .card{background:#fff;border-radius:16px;padding:40px;box-shadow:0 4px 16px rgba(0,0,0,0.08);} h1{margin:0 0 8px;color:#1db954;} p{margin:0 0 28px;color:#495057;} form{display:flex;flex-direction:column;gap:20px;} label{display:flex;flex-direction:column;font-size:.8rem;gap:6px;font-weight:600;color:#343a40;} input{padding:10px 14px;border:1px solid #ced4da;border-radius:8px;font-size:.85rem;font-family:inherit;} input:focus{outline:none;border-color:#1db954;box-shadow:0 0 0 3px rgba(29,185,84,.25);} .actions{text-align:right;margin-top:8px;} .btn{background:#1db954;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-size:.85rem;cursor:pointer;font-weight:600;} .btn[disabled]{opacity:.6;cursor:not-allowed;} .btn:hover:not([disabled]){background:#1ed760;} .error{background:#f8d7da;border:1px solid #f5c6cb;color:#721c24;padding:12px 16px;border-radius:8px;font-size:.75rem;} .help{font-size:.7rem;color:#6c757d;margin-top:4px;}`;
+  }
+
+  attachConfigHandlers() {
+    const form = this.shadowRoot.getElementById('config-form');
+    if (!form) return;
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const clientIdEl = this.shadowRoot.getElementById('client-id');
+      const clientSecretEl = this.shadowRoot.getElementById('client-secret');
+      const redirectUriEl = this.shadowRoot.getElementById('redirect-uri');
+      this.setState({
+        clientId: clientIdEl.value,
+        clientSecret: clientSecretEl.value,
+        redirectUri: redirectUriEl.value
+      });
+      this.saveSettings();
+    });
+  }
+
+  attachEventListeners() {
+    const refreshBtn = this.shadowRoot.getElementById('refresh-btn');
+    const generateBtn = this.shadowRoot.getElementById('generate-btn');
+    const authorizeBtn = this.shadowRoot.getElementById('authorize-btn');
+
+    if (refreshBtn) refreshBtn.addEventListener('click', () => this.loadStatus());
+    if (generateBtn) generateBtn.addEventListener('click', () => this.generateImage());
+    if (authorizeBtn) authorizeBtn.addEventListener('click', () => this.beginAuthorize());
+  }
+
+  async beginAuthorize() {
+    try {
+      const resp = await fetch(`${this.apiBaseUrl}/api/channels/com.spotify.status/authorize`, { credentials: 'include' });
+      const data = await resp.json();
+      if (data.success && data.authorize_url) {
+        const authWin = window.open(data.authorize_url, '_blank');
+        // Poll authorization status every 3s until authorized or window closed
+        const poll = async () => {
+          try {
+            const stResp = await fetch(`${this.apiBaseUrl}/api/channels/com.spotify.status/authorize/status`, { credentials: 'include' });
+            const stData = await stResp.json();
+            if (stData.authorized) {
+              this.setState({ authorized: true, error: null });
+              await this.loadStatus();
+              if (!this.refreshInterval) this.startAutoRefresh();
+              if (authWin && !authWin.closed) authWin.close();
+              return;
+            }
+            if (authWin && authWin.closed) return; // stop if user closed
+            setTimeout(poll, 3000);
+          } catch (e) {
+            console.warn('Auth status poll failed', e);
+            setTimeout(poll, 4000); // backoff
+          }
+        };
+        setTimeout(poll, 2500);
+      } else {
+        this.setState({ error: 'Failed to start authorization flow' });
+      }
+    } catch (e) {
+      this.setState({ error: 'Authorization start failed: ' + e });
+    }
   }
 
   getStatusText() {
@@ -258,19 +323,6 @@ class SpotifyStatusManager extends HTMLElement {
         Playing on ${this.escapeHtml(track.device)}
       </div>
     `;
-  }
-
-  attachEventListeners() {
-    const refreshBtn = this.shadowRoot.getElementById('refresh-btn');
-    const generateBtn = this.shadowRoot.getElementById('generate-btn');
-
-    if (refreshBtn) {
-      refreshBtn.addEventListener('click', () => this.loadStatus());
-    }
-
-    if (generateBtn) {
-      generateBtn.addEventListener('click', () => this.generateImage());
-    }
   }
 
   async generateImage() {
