@@ -10,9 +10,11 @@ import io
 import json
 import logging
 import requests
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable, List
 from PIL import Image, ImageDraw, ImageFont
 
 _SPOTIPY_AVAILABLE = False
@@ -87,6 +89,37 @@ class SpotifyStatusChannel:
         self.cache_timestamp = None
         self.cache_duration = 30  # seconds
 
+        # --- Push / Event streaming support (poll + dispatch) ---
+        # We present a very light-weight push abstraction so the host API service
+        # can simply call `register_listener(callback)` to receive track change events
+        # without needing to schedule polling jobs for this channel.
+        # This internally still performs short-interval polling (Spotify offers no
+        # first-party server push), but centralizes it within the plugin and only
+        # emits events when something meaningful changes.
+        self.supports_push = True  # Capability flag exposed in manifest
+        self.push_poll_interval = (
+            int(self.config.get("spotify", {}).get("push_poll_interval", 10))
+            if isinstance(self.config.get("spotify", {}).get("push_poll_interval", 10), (int, float))
+            else 10
+        )  # seconds between background checks
+        if self.push_poll_interval < 3:
+            # Hard floor to avoid API spam / rate-limit risk
+            self.push_poll_interval = 3
+
+        # Optional outbound webhook (POST) – configured via settings.json ("webhook_url")
+        self.webhook_url: Optional[str] = self.config.get("spotify", {}).get("webhook_url")
+
+        # Listener management (synchronous callbacks accepted; host can pass async
+        # functions wrapped via `lambda e: asyncio.create_task(async_fn(e))` if needed)
+        self._listeners: List[Callable[[Dict[str, Any]], None]] = []
+        self._listeners_lock = threading.Lock()
+        self._push_thread: Optional[threading.Thread] = None
+        self._push_thread_stop = threading.Event()
+        self._last_event_track_id: Optional[str] = None
+        self._last_event_is_playing: Optional[bool] = None
+        self._last_event_hash: Optional[str] = None
+        self._consecutive_errors = 0
+
         # Load persisted settings if present and merge with provided config
         persisted = self._load_settings()
         try:
@@ -113,6 +146,8 @@ class SpotifyStatusChannel:
         # Initialize Spotify client
         if not self.degraded:
             self._initialize_spotify_client()
+            # Start push thread early (it will block silently until authorized)
+            self._ensure_push_thread()
         else:
             logger.info("[SpotifyStatusChannel] Initialization skipped (degraded mode: missing spotipy)")
         
@@ -185,6 +220,9 @@ class SpotifyStatusChannel:
             except Exception as cache_e:  # noqa: BLE001
                 logger.debug(f"[SpotifyStatusChannel] No cached token available: {cache_e}")
                 self.spotify_client = None
+
+            # If we become authorized later (after credential update), make sure push loop is active
+            self._ensure_push_thread()
             
         except Exception as e:
             logger.error(f"Failed to initialize Spotify client: {e}")
@@ -227,6 +265,7 @@ class SpotifyStatusChannel:
                 "artist": ", ".join([artist['name'] for artist in current_track['item']['artists']]),
                 "album": current_track['item']['album']['name'],
                 "album_art_url": current_track['item']['album']['images'][0]['url'] if current_track['item']['album']['images'] else None,
+                "track_id": current_track['item']['id'],
                 "progress_ms": current_track.get('progress_ms', 0),
                 "duration_ms": current_track['item']['duration_ms'],
                 "is_playing": is_playing,
@@ -429,7 +468,13 @@ class SpotifyStatusChannel:
                     "supports_spotify": True,
                     "requires_auth": True,
                     "image_formats": ["jpg", "jpeg", "png"],
-                    "max_file_size": "5MB"
+                    "max_file_size": "5MB",
+                    # --- Push extension fields ---
+                    "update_modes": ["scheduler", "push"],
+                    "preferred_mode": "push",
+                    "push_supported": True,
+                    "push_event_types": ["now_playing_changed", "playback_state_changed"],
+                    "push_poll_interval": self.push_poll_interval
                 },
                 "configuration": {
                     "configured": configured,
@@ -462,7 +507,12 @@ class SpotifyStatusChannel:
                 "current_track": current_track,
                 "status": self.get_status(),
                 "degraded": self.degraded,
-                "dependencies": {"spotipy": _SPOTIPY_AVAILABLE}
+                "dependencies": {"spotipy": _SPOTIPY_AVAILABLE},
+                "push": {
+                    "active": self._push_thread is not None and self._push_thread.is_alive(),
+                    "listener_count": len(self._listeners),
+                    "webhook_configured": bool(self.webhook_url)
+                }
             }
             
         except Exception as e:
@@ -812,7 +862,14 @@ class SpotifyStatusChannel:
                     "Pillow>=10.0.0",
                     "requests>=2.31.0",
                     "fastapi>=0.100.0"
-                ]
+                ],
+                "push": {
+                    "supports_push": self.supports_push,
+                    "poll_interval": self.push_poll_interval,
+                    "active": self._push_thread is not None and self._push_thread.is_alive(),
+                    "listeners": len(self._listeners),
+                    "webhook_url": bool(self.webhook_url)
+                }
             })
 
         # --- Feature detection support (frontend calls /test to probe channel capabilities) ---
@@ -905,8 +962,129 @@ class SpotifyStatusChannel:
         @router.get("/ui/ping")
         async def ui_ping():
             return JSONResponse({"ok": True, "message": "spotify ui router active"})
+
+        # --------------- Push Event Helper Endpoints ---------------
+        @router.get("/push/status")
+        async def push_status():  # noqa: D401
+            return JSONResponse({
+                "supports_push": self.supports_push,
+                "thread_alive": self._push_thread.is_alive() if self._push_thread else False,
+                "listeners": len(self._listeners),
+                "poll_interval": self.push_poll_interval,
+                "webhook": bool(self.webhook_url)
+            })
+
+        @router.post("/push/trigger")
+        async def push_trigger():  # noqa: D401
+            # Manual trigger for debugging; forces immediate poll + dispatch if changed
+            changed = self._poll_and_maybe_emit(force=True)
+            return JSONResponse({"forced": True, "emitted": changed})
         
         return router
+
+    # =========================================================================
+    # Push / Event Streaming Implementation
+    # =========================================================================
+    def register_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """Register a listener to receive channel events.
+
+        A listener is a callable that accepts an event dict. It should be fast / non-blocking.
+        If async work is needed, wrap with `lambda e: asyncio.create_task(coro(e))` externally.
+        """
+        with self._listeners_lock:
+            if callback not in self._listeners:
+                self._listeners.append(callback)
+        self._ensure_push_thread()
+
+    def unregister_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        with self._listeners_lock:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+
+    def _ensure_push_thread(self):
+        """Start the background polling thread if not already running."""
+        if not self.supports_push:
+            return
+        if self._push_thread is not None and self._push_thread.is_alive():
+            return
+        # Fresh stop event
+        self._push_thread_stop.clear()
+        self._push_thread = threading.Thread(target=self._push_loop, name="SpotifyPushLoop", daemon=True)
+        self._push_thread.start()
+        logger.info("[SpotifyStatusChannel] Push loop thread started (interval=%ss)", self.push_poll_interval)
+
+    def _push_loop(self):
+        """Background thread loop that polls and emits events when state changes."""
+        while not self._push_thread_stop.is_set():
+            try:
+                self._poll_and_maybe_emit()
+                self._consecutive_errors = 0
+            except Exception as exc:  # noqa: BLE001
+                self._consecutive_errors += 1
+                if self._consecutive_errors <= 3:
+                    logger.warning("[SpotifyStatusChannel] Push loop error: %s", exc)
+                else:
+                    # After repeated failures, back off more aggressively
+                    logger.error("[SpotifyStatusChannel] Repeated push loop errors (%d): %s", self._consecutive_errors, exc)
+            # Dynamic sleep (longer if repeated errors)
+            backoff = min(self._consecutive_errors * 2, 30)
+            time.sleep(self.push_poll_interval + backoff)
+
+    def _poll_and_maybe_emit(self, force: bool = False) -> bool:
+        """Poll Spotify and emit an event if there is a meaningful change.
+
+        Returns True if an event was emitted.
+        """
+        if not self.spotify_client:
+            return False  # Not authorized yet
+        track_info = self.get_current_track()
+        if not track_info:
+            return False
+        track_id = track_info.get("track_id")
+        is_playing = track_info.get("is_playing")
+        # Build a lightweight change fingerprint
+        event_hash = f"{track_id}:{'1' if is_playing else '0'}"
+        changed_track = track_id is not None and track_id != self._last_event_track_id
+        changed_play_state = is_playing != self._last_event_is_playing
+        if not force and not (changed_track or changed_play_state):
+            return False
+
+        event_type = "now_playing_changed" if changed_track else "playback_state_changed"
+        event = {
+            "channel_id": "com.spotify.status",
+            "event_type": event_type,
+            "payload": track_info,
+            "ts": time.time(),
+            "version": 1,
+            "hash": event_hash,
+        }
+        self._last_event_track_id = track_id
+        self._last_event_is_playing = is_playing  # type: ignore[assignment]
+        self._last_event_hash = event_hash
+        self._dispatch_event(event)
+        return True
+
+    def _dispatch_event(self, event: Dict[str, Any]) -> None:
+        """Send event to registered listeners and optional webhook."""
+        # Copy listeners snapshot to avoid holding lock during callbacks
+        with self._listeners_lock:
+            listeners = list(self._listeners)
+        for cb in listeners:
+            try:
+                cb(event)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[SpotifyStatusChannel] Listener raised: %s", exc)
+        if self.webhook_url:
+            try:
+                # Fire-and-forget POST (ignore response body)
+                requests.post(self.webhook_url, json=event, timeout=5)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[SpotifyStatusChannel] Webhook POST failed: %s", exc)
+
+    def stop(self):  # Optional public stop hook
+        if self._push_thread and self._push_thread.is_alive():
+            self._push_thread_stop.set()
+            logger.info("[SpotifyStatusChannel] Stopping push loop thread...")
 
 
 # Export the channel class for embedded plugin discovery
