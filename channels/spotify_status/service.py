@@ -22,16 +22,28 @@ except Exception:  # noqa: BLE001
     _SERVICE_DIR = Path(__file__).parent
     _models_path = _SERVICE_DIR / "models.py"
     if _models_path.exists():
-        _spec = importlib.util.spec_from_file_location("spotify_status_models_for_service", _models_path)
-        if _spec and _spec.loader:  # type: ignore[attr-defined]
-            _mod = importlib.util.module_from_spec(_spec)
-            try:
-                _spec.loader.exec_module(_mod)  # type: ignore[attr-defined]
-                TrackInfo = getattr(_mod, "TrackInfo")  # type: ignore
-            except Exception as _import_err:  # noqa: BLE001
-                raise ImportError(f"Failed dynamic-load of models.py for service: {_import_err}") from _import_err
+        unique_name = "spotify_status_models"
+        # Reuse already loaded module if present
+        existing = sys.modules.get(unique_name)
+        if existing is not None:
+            TrackInfo = getattr(existing, "TrackInfo", None)  # type: ignore
+            if TrackInfo is None:
+                raise ImportError("Loaded spotify_status_models missing TrackInfo")
         else:
-            raise ImportError("Could not construct spec for models.py in service dynamic import")
+            _spec = importlib.util.spec_from_file_location(unique_name, _models_path)
+            if _spec and _spec.loader:  # type: ignore[attr-defined]
+                _mod = importlib.util.module_from_spec(_spec)
+                # Pre-register before execution so dataclass decorator can resolve module
+                sys.modules[unique_name] = _mod
+                try:
+                    _spec.loader.exec_module(_mod)  # type: ignore[attr-defined]
+                    TrackInfo = getattr(_mod, "TrackInfo")  # type: ignore
+                except Exception as _import_err:  # noqa: BLE001
+                    # Clean up failed registration to avoid poisoning subsequent attempts
+                    sys.modules.pop(unique_name, None)
+                    raise ImportError(f"Failed dynamic-load of models.py for service: {_import_err}") from _import_err
+            else:
+                raise ImportError("Could not construct spec for models.py in service dynamic import")
     else:
         raise ImportError("models.py not found adjacent to service.py; cannot proceed")
 
