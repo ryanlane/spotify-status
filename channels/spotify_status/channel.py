@@ -524,7 +524,18 @@ class SpotifyStatusChannel:
             }
     
     async def request_image(self, request_data: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Generate current track album art image"""
+        """Generate current track album art image.
+
+        Updated for new embedded channel image pipeline:
+        - Return raw image bytes under the "bytes" key (not base64) so the host API
+          can store and serve via /api/channels/{id}/images/{image_id} without a
+          base64 round‑trip.
+        - Base64 is only included if the caller explicitly sets include_base64=True
+          (or for backward compatibility if omit_base64=False was not passed and
+          include_base64 not provided – default now is to suppress to reduce payload size).
+        - Retains legacy "image" field (base64) only when included so older UIs do
+          not break if directly invoking plugin endpoint.
+        """
         steps: list[str] = []
         reason: Optional[str] = None
         try:
@@ -532,6 +543,15 @@ class SpotifyStatusChannel:
             options = request_data.get("options", {}) if request_data else {}
             width = int(options.get("width", 800) or 800)
             height = int(options.get("height", 480) or 480)
+
+            # Flags controlling response shaping
+            include_base64_flag = bool(
+                (request_data or {}).get("include_base64", False)
+            )
+            suppress_legacy = bool(
+                (request_data or {}).get("suppress_legacy_base64", not include_base64_flag)
+            )
+
             spotify_cfg = self.config.get("spotify", {})
             if not (spotify_cfg.get("client_id") and spotify_cfg.get("client_secret")):
                 reason = "not_configured"
@@ -564,25 +584,29 @@ class SpotifyStatusChannel:
                 image = self.create_no_music_image(width, height)
                 description = "No music currently playing on Spotify"
 
-            steps.append("encode_jpeg")
+            steps.append("encode_image")
             buffer = io.BytesIO()
+            out_format = 'jpeg'
+            content_type = 'image/jpeg'
             try:
                 image.save(buffer, format='JPEG', quality=95)
-                out_format = 'jpeg'
             except Exception as jpeg_err:  # noqa: BLE001
-                # Fallback to PNG (environment may lack JPEG encoder)
                 logger.warning("JPEG encode failed (%s); falling back to PNG", jpeg_err)
                 steps.append("jpeg_fallback_png")
                 buffer = io.BytesIO()
                 image.save(buffer, format='PNG')
                 out_format = 'png'
+                content_type = 'image/png'
 
-            image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            raw_bytes = buffer.getvalue()
+            image_base64: Optional[str] = None
+            if include_base64_flag and not suppress_legacy:
+                steps.append("encode_base64")
+                image_base64 = base64.b64encode(raw_bytes).decode('utf-8')
+
             steps.append("return_success")
-
-            return {
+            result: Dict[str, Any] = {
                 "success": True,
-                "image": image_base64,
                 "format": out_format,
                 "width": width,
                 "height": height,
@@ -590,7 +614,15 @@ class SpotifyStatusChannel:
                 "track_info": track_info,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "steps": steps,
+                # New preferred transport fields consumed by host API router
+                "bytes": raw_bytes,           # raw binary for channel router
+                "content_type": content_type,
+                "preferred_transport": "bytes",
             }
+            if image_base64 is not None:
+                # Legacy field name "image" used by older UIs
+                result["image"] = image_base64
+            return result
         except Exception as e:  # noqa: BLE001
             logger.exception("[SpotifyStatusChannel] Failed to generate image at step %s: %s", steps[-1] if steps else 'start', e)
             reason = reason or "generation_error"
