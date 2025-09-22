@@ -15,45 +15,52 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
 import sys
+import importlib.util
+from types import ModuleType
 from PIL import Image  # type: ignore
 
 # ---------------------------------------------------------------------------
-# Flexible intra-plugin imports
-# When the channel module is loaded via importlib.spec_from_file_location with a
-# synthetic module name (not a real package), relative imports (e.g. `.renderer`)
-# will fail. We defensively inject the current directory into sys.path and try
-# relative first (for IDE friendliness) then absolute fallback.
-# ---------------------------------------------------------------------------
 _PLUGIN_DIR = Path(__file__).parent
 if str(_PLUGIN_DIR) not in sys.path:
-    # Append instead of inserting at index 0 to avoid overshadowing other plugin
-    # modules with common names like "models" when they perform bare imports.
+    # Append so we do not shadow other plugins' generic module names (e.g. models)
     sys.path.append(str(_PLUGIN_DIR))
 
-try:  # Preferred (works if package context established)
-    from .renderer import PillowRenderer, RenderOptions  # type: ignore
-except Exception:  # noqa: BLE001
-    from renderer import PillowRenderer, RenderOptions  # type: ignore
+def _import_local(module_name: str, file_name: Optional[str] = None) -> ModuleType:
+    """Import a sibling module by explicit path, avoiding fragile relative imports.
 
-try:
-    from .svg_renderer import SvgRenderer  # type: ignore
-except Exception:  # noqa: BLE001
-    from svg_renderer import SvgRenderer  # type: ignore
+    This bypasses Python's package-relative resolution so the plugin can be
+    safely loaded via importlib with any synthetic module name.
+    """
+    target = _PLUGIN_DIR / (file_name or f"{module_name}.py")
+    if not target.exists():
+        raise ImportError(f"Local module file not found: {target}")
+    unique_name = f"spotify_status_{module_name}"
+    spec = importlib.util.spec_from_file_location(unique_name, target)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load spec for {target}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)  # type: ignore[assignment]
+    except Exception as e:  # noqa: BLE001
+        raise ImportError(f"Failed executing {target}: {e}") from e
+    return module
 
-try:
-    from .service import SpotifyService  # type: ignore
-except Exception:  # noqa: BLE001
-    from service import SpotifyService  # type: ignore
+# Load local modules explicitly (no relative import usage)
+renderer_mod = _import_local("renderer")
+PillowRenderer = getattr(renderer_mod, "PillowRenderer")
+RenderOptions = getattr(renderer_mod, "RenderOptions")
 
-try:
-    from .models import TrackInfo  # type: ignore
-except Exception:  # noqa: BLE001
-    from models import TrackInfo  # type: ignore
+svg_renderer_mod = _import_local("svg_renderer")
+SvgRenderer = getattr(svg_renderer_mod, "SvgRenderer")
 
-try:
-    from .push import PushManager  # type: ignore
-except Exception:  # noqa: BLE001
-    from push import PushManager  # type: ignore
+service_mod = _import_local("service")
+SpotifyService = getattr(service_mod, "SpotifyService")
+
+models_mod = _import_local("models", file_name="models.py") if (_PLUGIN_DIR / "models.py").exists() else _import_local("models")
+TrackInfo = getattr(models_mod, "TrackInfo")
+
+push_mod = _import_local("push")
+PushManager = getattr(push_mod, "PushManager")
 
 _SPOTIPY_AVAILABLE = False
 spotipy = None  # type: ignore
@@ -154,17 +161,16 @@ class SpotifyStatusChannel:
         self.webhook_url: Optional[str] = self.config.get("spotify", {}).get("webhook_url")
 
         # Push manager abstraction (replaces raw thread + listener lists)
-        self._push_manager: Optional[PushManager] = None
+        # Defer type hint (dynamic import); simple assignment avoids runtime parser complaints
+        self._push_manager = None  # type: ignore[attr-defined]
 
         # Load persisted settings if present and merge with provided config
         persisted = self._load_settings()
         try:
             if persisted:
-                # Merge persisted settings with provided config (provided wins)
                 base_spotify_cfg = self.config.get("spotify", {}) or {}
                 persisted_spotify_cfg = persisted.get("spotify", {}) or {}
                 merged = {**persisted_spotify_cfg, **base_spotify_cfg}
-                # Auto-upgrade legacy redirect URIs to new canonical host 127.0.0.1:5000
                 legacy_redirects = {
                     "http://localhost:8080/api/channels/com.spotify.status/callback",
                     "http://localhost:5000/api/channels/com.spotify.status/callback",
@@ -174,7 +180,6 @@ class SpotifyStatusChannel:
                     merged["redirect_uri"] = canonical_redirect
                 self.config["spotify"] = merged
             else:
-                # Persist initial scaffold so subsequent restarts retain structure
                 self._save_settings(self.config)
         except Exception as merge_e:  # noqa: BLE001
             logger.warning("[SpotifyStatusChannel] Failed merging persisted settings: %s", merge_e)
