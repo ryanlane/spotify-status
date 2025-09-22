@@ -12,10 +12,15 @@ import logging
 import requests
 import threading
 import time
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
 from PIL import Image, ImageDraw, ImageFont
+from .renderer import PillowRenderer, RenderOptions
+from .service import SpotifyService
+from .models import TrackInfo
+from .push import PushManager
 
 _SPOTIPY_AVAILABLE = False
 spotipy = None  # type: ignore
@@ -90,6 +95,9 @@ class SpotifyStatusChannel:
         self.settings_path = self.data_dir / "settings.json"
         self.token_path = self.data_dir / ".spotify_cache"  # spotipy cache path
         self.degraded = not _SPOTIPY_AVAILABLE
+        # HTML template support attributes (initialized lazily)
+        self.templates_dir = self.ui_dir / "templates"
+        self._template_env = None  # lazy Jinja2 env
         
         # Ensure directories exist
         self.data_dir.mkdir(exist_ok=True)
@@ -101,6 +109,8 @@ class SpotifyStatusChannel:
         self.last_track_cache = None
         self.cache_timestamp = None
         self.cache_duration = 30  # seconds
+        # Renderer instance (can be swapped with alternate implementations later)
+        self._renderer = PillowRenderer()
 
         # --- Push / Event streaming support (poll + dispatch) ---
         # We present a very light-weight push abstraction so the host API service
@@ -122,16 +132,8 @@ class SpotifyStatusChannel:
         # Optional outbound webhook (POST) – configured via settings.json ("webhook_url")
         self.webhook_url: Optional[str] = self.config.get("spotify", {}).get("webhook_url")
 
-        # Listener management (synchronous callbacks accepted; host can pass async
-        # functions wrapped via `lambda e: asyncio.create_task(async_fn(e))` if needed)
-        self._listeners: List[Callable[[Dict[str, Any]], None]] = []
-        self._listeners_lock = threading.Lock()
-        self._push_thread: Optional[threading.Thread] = None
-        self._push_thread_stop = threading.Event()
-        self._last_event_track_id: Optional[str] = None
-        self._last_event_is_playing: Optional[bool] = None
-        self._last_event_hash: Optional[str] = None
-        self._consecutive_errors = 0
+        # Push manager abstraction (replaces raw thread + listener lists)
+        self._push_manager: Optional[PushManager] = None
 
         # Load persisted settings if present and merge with provided config
         persisted = self._load_settings()
@@ -160,7 +162,7 @@ class SpotifyStatusChannel:
         if not self.degraded:
             self._initialize_spotify_client()
             # Start push thread early (it will block silently until authorized)
-            self._ensure_push_thread()
+            self._ensure_push_manager()
         else:
             logger.info("[SpotifyStatusChannel] Initialization skipped (degraded mode: missing spotipy)")
         
@@ -225,14 +227,19 @@ class SpotifyStatusChannel:
                 if token_info and token_info.get('access_token'):
                     self.token_info = token_info
                     self.spotify_client = spotipy.Spotify(auth_manager=auth_manager)
-                    logger.info("Spotify client initialized from cached token")
+                    # Defer import to avoid circular during module load (already imported at top, safe reuse)
+                    from .service import SpotifyService  # local import for clarity
+                    self.spotify_service = SpotifyService(self.spotify_client, cache_ttl=self.cache_duration)
+                    logger.info("Spotify client initialized from cached token (service ready)")
                 else:
                     # Not yet authorized; keep auth_manager handy for later callback use
                     self.spotify_client = None
+                    self.spotify_service = None
                     logger.info("Spotify client not yet authorized (no cached token)")
             except Exception as cache_e:  # noqa: BLE001
                 logger.debug(f"[SpotifyStatusChannel] No cached token available: {cache_e}")
                 self.spotify_client = None
+                self.spotify_service = None
 
             # If we become authorized later (after credential update), make sure push loop is active
             self._ensure_push_thread()
@@ -242,209 +249,28 @@ class SpotifyStatusChannel:
             self.spotify_client = None
     
     def get_current_track(self) -> Optional[Dict[str, Any]]:
-        """Get currently playing track from Spotify API"""
-        if not self.spotify_client:
+        """Return current track info via SpotifyService (dict form)."""
+        if not self.spotify_service:
             return None
-        
-        # Check cache first
-        if (self.last_track_cache and self.cache_timestamp and 
-            (datetime.now() - self.cache_timestamp).total_seconds() < self.cache_duration):
-            return self.last_track_cache
-        
-        try:
-            spotify_cfg = self.config.get("spotify", {})
-            market = spotify_cfg.get("market") or None
-            additional_types = spotify_cfg.get("additional_types") or None
-            # Validate additional_types (only track,episode allowed)
-            if additional_types:
-                cleaned = []
-                for t in str(additional_types).split(','):
-                    t = t.strip().lower()
-                    if t in ("track", "episode") and t not in cleaned:
-                        cleaned.append(t)
-                additional_types = ",".join(cleaned) if cleaned else None
-            current_track = self.spotify_client.current_playback(market=market, additional_types=additional_types)
-
-            if not current_track or not current_track.get('item'):
-                return None
-
-            # We'll surface paused tracks too (so album art still renders). Distinguish with paused flag.
-            is_playing = bool(current_track.get('is_playing'))
-            if not is_playing:
-                logger.debug("[SpotifyStatusChannel] Playback paused; returning last track metadata for display")
-
-            track_info = {
-                "name": current_track['item']['name'],
-                "artist": ", ".join([artist['name'] for artist in current_track['item']['artists']]),
-                "album": current_track['item']['album']['name'],
-                "album_art_url": current_track['item']['album']['images'][0]['url'] if current_track['item']['album']['images'] else None,
-                "track_id": current_track['item']['id'],
-                "progress_ms": current_track.get('progress_ms', 0),
-                "duration_ms": current_track['item']['duration_ms'],
-                "is_playing": is_playing,
-                "paused": (not is_playing),
-                "device": current_track['device']['name'] if current_track.get('device') else "Unknown"
-            }
-            
-            # Cache the result
-            self.last_track_cache = track_info
+        cfg = self.config.get("spotify", {})
+        market = cfg.get("market") or None
+        additional_types = cfg.get("additional_types") or None
+        if additional_types:
+            cleaned: List[str] = []
+            for t in str(additional_types).split(','):
+                t = t.strip().lower()
+                if t in ("track", "episode") and t not in cleaned:
+                    cleaned.append(t)
+            additional_types = ",".join(cleaned) if cleaned else None
+        track = self.spotify_service.get_current_track(market=market, additional_types=additional_types)  # type: ignore[arg-type]
+        if track:
+            data = track.to_dict()
+            self.last_track_cache = data
             self.cache_timestamp = datetime.now()
-            
-            return track_info
-            
-        except Exception as e:
-            logger.error(f"Failed to get current track: {e}")
-            return None
+            return data
+        return None
     
-    def download_album_art(self, album_art_url: str) -> Optional[Image.Image]:
-        """Download album art from Spotify"""
-        try:
-            response = requests.get(album_art_url, timeout=10)
-            response.raise_for_status()
-            
-            image = Image.open(io.BytesIO(response.content))
-            return image
-            
-        except Exception as e:
-            logger.error(f"Failed to download album art: {e}")
-            return None
-    
-    def create_status_image(self, track_info: Dict[str, Any], width: int = 800, height: int = 480) -> Image.Image:
-        """Create status image with album art and metadata"""
-        
-        # Download album art
-        album_art = None
-        if track_info.get('album_art_url'):
-            album_art = self.download_album_art(track_info['album_art_url'])
-        
-        # Create base image
-        image = Image.new('RGB', (width, height), color='white')
-        draw = ImageDraw.Draw(image)
-        
-        if album_art:
-            # Resize album art to fit display
-            art_size = min(width, height) - 100  # Leave space for text
-            album_art = album_art.resize((art_size, art_size), Image.Resampling.LANCZOS)
-            
-            # Center album art
-            art_x = (width - art_size) // 2
-            art_y = 20
-            image.paste(album_art, (art_x, art_y))
-            
-            # Add metadata below album art
-            text_y = art_y + art_size + 20
-        else:
-            # No album art, show large text
-            text_y = 50
-            draw.rectangle([width//4, 50, 3*width//4, height//2], fill='lightgray', outline='black')
-            try:
-                draw.text((width//2, height//4), "♪", anchor="mm", fill='black')
-            except Exception:
-                # Fallback without anchor parameter for older Pillow
-                w_note, h_note = draw.textlength("♪"), 16
-                draw.text((width//2 - int(w_note/2), height//4 - int(h_note/2)), "♪", fill='black')
-        
-        # Add track information
-        try:
-            # Try to use a larger font if available
-            font_large = ImageFont.truetype("arial.ttf", 24)
-            font_medium = ImageFont.truetype("arial.ttf", 18)
-            font_small = ImageFont.truetype("arial.ttf", 14)
-        except:
-            # Fallback to default font
-            font_large = ImageFont.load_default()
-            font_medium = ImageFont.load_default()
-            font_small = ImageFont.load_default()
-        
-        # Track name
-        track_name = track_info.get('name', 'Unknown Track')
-        if len(track_name) > 30:
-            track_name = track_name[:27] + "..."
-        try:
-            draw.text((width//2, text_y), track_name, font=font_large, anchor="mt", fill='black')
-        except Exception:
-            tw = draw.textlength(track_name, font=font_large)
-            draw.text((width//2 - int(tw/2), text_y), track_name, font=font_large, fill='black')
-        
-        # Artist name
-        artist_name = track_info.get('artist', 'Unknown Artist')
-        if len(artist_name) > 40:
-            artist_name = artist_name[:37] + "..."
-        try:
-            draw.text((width//2, text_y + 35), f"by {artist_name}", font=font_medium, anchor="mt", fill='gray')
-        except Exception:
-            by_line = f"by {artist_name}"
-            tw = draw.textlength(by_line, font=font_medium)
-            draw.text((width//2 - int(tw/2), text_y + 35), by_line, font=font_medium, fill='gray')
-        
-        # Album name
-        album_name = track_info.get('album', 'Unknown Album')
-        if len(album_name) > 40:
-            album_name = album_name[:37] + "..."
-        try:
-            draw.text((width//2, text_y + 65), f"from {album_name}", font=font_small, anchor="mt", fill='gray')
-        except Exception:
-            from_line = f"from {album_name}"
-            tw = draw.textlength(from_line, font=font_small)
-            draw.text((width//2 - int(tw/2), text_y + 65), from_line, font=font_small, fill='gray')
-        
-        # Progress bar
-        if track_info.get('progress_ms') and track_info.get('duration_ms'):
-            progress = track_info['progress_ms'] / track_info['duration_ms']
-            bar_width = width - 100
-            bar_height = 8
-            bar_x = 50
-            bar_y = text_y + 100
-            
-            # Background bar
-            draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], fill='lightgray', outline='gray')
-            
-            # Progress bar
-            progress_width = int(bar_width * progress)
-            draw.rectangle([bar_x, bar_y, bar_x + progress_width, bar_y + bar_height], fill='black')
-            
-            # Time stamps
-            current_time = f"{track_info['progress_ms'] // 60000}:{(track_info['progress_ms'] // 1000) % 60:02d}"
-            total_time = f"{track_info['duration_ms'] // 60000}:{(track_info['duration_ms'] // 1000) % 60:02d}"
-            draw.text((bar_x, bar_y + bar_height + 5), current_time, font=font_small, fill='gray')
-            draw.text((bar_x + bar_width, bar_y + bar_height + 5), total_time, font=font_small, anchor="rt", fill='gray')
-        
-        # Device info
-        device = track_info.get('device', 'Unknown Device')
-        try:
-            draw.text((width//2, height - 30), f"Playing on {device}", font=font_small, anchor="mt", fill='gray')
-        except Exception:
-            line = f"Playing on {device}"
-            tw = draw.textlength(line, font=font_small)
-            draw.text((width//2 - int(tw/2), height - 30), line, font=font_small, fill='gray')
-        
-        return image
-    
-    def create_no_music_image(self, width: int = 800, height: int = 480) -> Image.Image:
-        """Create image when no music is playing"""
-        image = Image.new('RGB', (width, height), color='white')
-        draw = ImageDraw.Draw(image)
-        
-        try:
-            font_large = ImageFont.truetype("arial.ttf", 36)
-            font_medium = ImageFont.truetype("arial.ttf", 24)
-        except:
-            font_large = ImageFont.load_default()
-            font_medium = ImageFont.load_default()
-        
-        # Draw large music note
-        def center_line(y, text, font, fill):
-            try:
-                draw.text((width//2, y), text, font=font, anchor="mm", fill=fill)
-            except Exception:
-                tw = draw.textlength(text, font=font)
-                th = 16
-                draw.text((width//2 - int(tw/2), y - int(th/2)), text, font=font, fill=fill)
-        center_line(height//2 - 50, "♪", font_large, 'lightgray')
-        center_line(height//2 + 20, "No music playing", font_medium, 'gray')
-        center_line(height//2 + 50, "Start playing on Spotify", font_medium, 'lightgray')
-        
-        return image
+    # Removed image rendering helper methods; now delegated to PillowRenderer
     
     # =========================================================================
     # Embedded Plugin Interface - Required for Mimir Plugin Architecture
@@ -536,6 +362,22 @@ class SpotifyStatusChannel:
                 "error": str(e),
                 "healthy": False
             }
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return lightweight health/status snapshot.
+
+        Exposed via /health and embedded in manifest. Pulled into its own method
+        to keep `get_manifest` smaller and enable reuse by potential future
+        monitoring endpoints.
+        """
+        return {
+            "degraded": self.degraded,
+            "authorized": self.spotify_client is not None,
+            "cache_age_sec": (datetime.now() - self.cache_timestamp).total_seconds() if self.cache_timestamp else None,
+            "listeners": len(self._listeners),
+            "push_thread": (self._push_thread.is_alive() if self._push_thread else False),
+            "poll_interval": self.push_poll_interval,
+        }
     
     async def request_image(self, request_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """Generate current track album art image.
@@ -615,13 +457,13 @@ class SpotifyStatusChannel:
             if pre_encoded_bytes is None:
                 if track_info:
                     steps.append("create_status_image")
-                    image = self.create_status_image(track_info, width, height)
+                    image = self._renderer.create_status_image(track_info, RenderOptions(width=width, height=height, grayscale=grayscale_flag))
                     track_name = track_info.get('name', 'Unknown Track')
                     artist = track_info.get('artist', 'Unknown Artist')
                     description = f"Now playing: {track_name} by {artist}"
                 else:
                     steps.append("create_no_music_image")
-                    image = self.create_no_music_image(width, height)
+                    image = self._renderer.create_no_music_image(RenderOptions(width=width, height=height, grayscale=grayscale_flag))
                     description = "No music currently playing on Spotify"
 
                 if grayscale_flag:
