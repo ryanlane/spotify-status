@@ -35,6 +35,19 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
+# Attempt optional imports for HTML rendering pathway
+try:  # HTML template rendering
+    from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
+    _JINJA2_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    _JINJA2_AVAILABLE = False
+
+try:  # Headless browser screenshot
+    from playwright.sync_api import sync_playwright  # type: ignore
+    _PLAYWRIGHT_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    _PLAYWRIGHT_AVAILABLE = False
+
 # (logging already configured above)
 
 
@@ -488,6 +501,7 @@ class SpotifyStatusChannel:
                     "client_secret_present": bool(spotify_cfg.get("client_secret")),
                     "market": market,
                     "additional_types": additional_types,
+                    "render_mode": spotify_cfg.get("render_mode", "pillow"),
                 },
                 "ui": {
                     "entry_point": "/api/channels/com.spotify.status/ui/index.html",
@@ -543,6 +557,8 @@ class SpotifyStatusChannel:
             options = request_data.get("options", {}) if request_data else {}
             width = int(options.get("width", 800) or 800)
             height = int(options.get("height", 480) or 480)
+            render_mode = (options.get("render_mode") or self.config.get("spotify", {}).get("render_mode") or "pillow").lower()
+            grayscale_flag = bool(options.get("grayscale", False))
 
             # Flags controlling response shaping
             include_base64_flag = bool(
@@ -572,33 +588,78 @@ class SpotifyStatusChannel:
 
             steps.append("get_current_track")
             track_info = self.get_current_track()
-            steps.append("choose_template")
-            if track_info:
-                steps.append("create_status_image")
-                image = self.create_status_image(track_info, width, height)
-                track_name = track_info.get('name', 'Unknown Track')
-                artist = track_info.get('artist', 'Unknown Artist')
-                description = f"Now playing: {track_name} by {artist}"
-            else:
-                steps.append("create_no_music_image")
-                image = self.create_no_music_image(width, height)
-                description = "No music currently playing on Spotify"
 
-            steps.append("encode_image")
-            buffer = io.BytesIO()
+            pre_encoded_bytes: Optional[bytes] = None
             out_format = 'jpeg'
             content_type = 'image/jpeg'
-            try:
-                image.save(buffer, format='JPEG', quality=95)
-            except Exception as jpeg_err:  # noqa: BLE001
-                logger.warning("JPEG encode failed (%s); falling back to PNG", jpeg_err)
-                steps.append("jpeg_fallback_png")
-                buffer = io.BytesIO()
-                image.save(buffer, format='PNG')
-                out_format = 'png'
-                content_type = 'image/png'
 
-            raw_bytes = buffer.getvalue()
+            if render_mode == "html":
+                steps.append("html_mode_selected")
+                if not self._supports_html_rendering():
+                    steps.append("html_mode_unavailable_fallback")
+                else:
+                    try:
+                        steps.append("html_render_start")
+                        pre_encoded_bytes = await self._render_html_image(track_info, width, height, options)
+                        if pre_encoded_bytes:
+                            steps.append("html_render_success")
+                            out_format = 'png'  # Playwright screenshot default
+                            content_type = 'image/png'
+                        else:
+                            steps.append("html_render_returned_none_fallback")
+                    except Exception as html_e:  # noqa: BLE001
+                        logger.warning("[SpotifyStatusChannel] HTML render failed, falling back to pillow: %s", html_e)
+                        steps.append("html_render_exception_fallback")
+
+            steps.append("choose_template")
+            if pre_encoded_bytes is None:
+                if track_info:
+                    steps.append("create_status_image")
+                    image = self.create_status_image(track_info, width, height)
+                    track_name = track_info.get('name', 'Unknown Track')
+                    artist = track_info.get('artist', 'Unknown Artist')
+                    description = f"Now playing: {track_name} by {artist}"
+                else:
+                    steps.append("create_no_music_image")
+                    image = self.create_no_music_image(width, height)
+                    description = "No music currently playing on Spotify"
+
+                if grayscale_flag:
+                    try:
+                        steps.append("apply_grayscale")
+                        image = image.convert("L")
+                    except Exception:  # noqa: BLE001
+                        steps.append("grayscale_failed")
+                steps.append("encode_image")
+                buffer = io.BytesIO()
+                try:
+                    image.save(buffer, format='JPEG', quality=95)
+                except Exception as jpeg_err:  # noqa: BLE001
+                    logger.warning("JPEG encode failed (%s); falling back to PNG", jpeg_err)
+                    steps.append("jpeg_fallback_png")
+                    buffer = io.BytesIO()
+                    image.save(buffer, format='PNG')
+                    out_format = 'png'
+                    content_type = 'image/png'
+                raw_bytes = buffer.getvalue()
+            else:
+                # pre-encoded PNG from HTML path
+                raw_bytes = pre_encoded_bytes
+                description = "HTML rendered Spotify status" if track_info else "HTML rendered no music screen"
+                if grayscale_flag:
+                    try:
+                        steps.append("apply_grayscale_html")
+                        tmp_img = Image.open(io.BytesIO(raw_bytes))
+                        tmp_img = tmp_img.convert("L")
+                        buf2 = io.BytesIO()
+                        tmp_img.save(buf2, format='PNG')
+                        raw_bytes = buf2.getvalue()
+                        out_format = 'png'
+                        content_type = 'image/png'
+                    except Exception:  # noqa: BLE001
+                        steps.append("grayscale_html_failed")
+
+            # ...existing code for base64 encode and return...
             image_base64: Optional[str] = None
             if include_base64_flag and not suppress_legacy:
                 steps.append("encode_base64")
@@ -614,13 +675,13 @@ class SpotifyStatusChannel:
                 "track_info": track_info,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "steps": steps,
-                # New preferred transport fields consumed by host API router
-                "bytes": raw_bytes,           # raw binary for channel router
+                "bytes": raw_bytes,
                 "content_type": content_type,
                 "preferred_transport": "bytes",
+                "render_mode": render_mode,
+                "grayscale": grayscale_flag,
             }
             if image_base64 is not None:
-                # Legacy field name "image" used by older UIs
                 result["image"] = image_base64
             return result
         except Exception as e:  # noqa: BLE001
@@ -635,35 +696,81 @@ class SpotifyStatusChannel:
                 "exception_type": type(e).__name__,
             }
     
-    def get_status(self) -> Dict[str, Any]:
-        """Get current channel status"""
-        try:
-            spotify_connected = self.spotify_client is not None
-            current_track = self.get_current_track()
-            
+    # ---------------- HTML Rendering Helpers ----------------
+    def _supports_html_rendering(self) -> bool:
+        return _JINJA2_AVAILABLE and _PLAYWRIGHT_AVAILABLE and self.templates_dir.exists()
+
+    def _get_template_env(self):
+        if self._template_env is None and _JINJA2_AVAILABLE and self.templates_dir.exists():
+            try:
+                self._template_env = Environment(
+                    loader=FileSystemLoader(str(self.templates_dir)),
+                    autoescape=select_autoescape(["html", "xml"]),
+                    enable_async=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[SpotifyStatusChannel] Failed to init Jinja2 env: %s", e)
+                self._template_env = None
+        return self._template_env
+
+    async def _render_html_image(self, track_info: Optional[Dict[str, Any]], width: int, height: int, options: Dict[str, Any]) -> Optional[bytes]:
+        if not self._supports_html_rendering():
+            return None
+        env = self._get_template_env()
+        if env is None:
+            return None
+        template_name = "now_playing.html"
+        if not (self.templates_dir / template_name).exists():
+            return None
+        theme = (options.get("theme") or "light").lower()
+        ctx = self._build_template_context(track_info, width, height, theme)
+        # Render HTML synchronously then screenshot in a worker thread to avoid blocking loop
+        def _do_render() -> Optional[bytes]:  # blocking
+            try:
+                html = env.get_template(template_name).render(**ctx)
+                with sync_playwright() as p:  # type: ignore
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page(viewport={"width": width, "height": height})
+                    page.set_content(html, wait_until="networkidle")
+                    # Full page screenshot (already sized to viewport)
+                    png_bytes = page.screenshot(type="png")
+                    browser.close()
+                    return png_bytes
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[SpotifyStatusChannel] _render_html_image error: %s", e)
+                return None
+        return await asyncio.to_thread(_do_render)
+
+    def _build_template_context(self, track_info: Optional[Dict[str, Any]], width: int, height: int, theme: str) -> Dict[str, Any]:
+        if not track_info:
             return {
-                "active": True,
-                "healthy": spotify_connected,
-                "lastUpdate": datetime.now().isoformat(),
-                "lastError": None,
-                "version": "1.0.0",
-                "spotify_connected": spotify_connected,
-                "currently_playing": current_track is not None,
-                "track_name": current_track.get('name') if current_track else None
+                "has_track": False,
+                "width": width,
+                "height": height,
+                "theme": theme,
+                "message": "No music playing",
             }
-            
-        except Exception as e:
-            return {
-                "active": False,
-                "healthy": False,
-                "lastUpdate": datetime.now().isoformat(),
-                "lastError": str(e),
-                "version": "1.0.0",
-                "spotify_connected": False,
-                "currently_playing": False
-            }
-    
-    def get_router(self) -> APIRouter:
+        duration = track_info.get("duration_ms") or 0
+        progress = track_info.get("progress_ms") or 0
+        pct = (progress / duration * 100) if duration else 0
+        return {
+            "has_track": True,
+            "width": width,
+            "height": height,
+            "theme": theme,
+            "track_name": track_info.get("name"),
+            "artist_name": track_info.get("artist"),
+            "album_name": track_info.get("album"),
+            "album_art_url": track_info.get("album_art_url"),
+            "is_playing": track_info.get("is_playing"),
+            "progress_ms": progress,
+            "duration_ms": duration,
+            "progress_pct": pct,
+            "device": track_info.get("device"),
+        }
+
+    # ...existing code...
+    def get_router(self) -> APIRouter:  # existing method already starts here earlier; we patch inside endpoints
         """Get FastAPI router for custom endpoints"""
         router = APIRouter()
         logger.info("[SpotifyStatusChannel] Building router and mounting UI directory: %s", self.ui_dir)
@@ -674,7 +781,6 @@ class SpotifyStatusChannel:
             cfg = self.config.get("spotify", {})
             masked = {
                 "client_id": cfg.get("client_id"),
-                # Mask secret fully except last 4 chars
                 "client_secret": ("***" + cfg.get("client_secret", "")[-4:]) if cfg.get("client_secret") else None,
                 "redirect_uri": cfg.get(
                     "redirect_uri",
@@ -684,6 +790,7 @@ class SpotifyStatusChannel:
                 "authorized": bool(self.spotify_client),
                 "market": cfg.get("market"),
                 "additional_types": cfg.get("additional_types"),
+                "render_mode": cfg.get("render_mode", "pillow"),
             }
             return JSONResponse({"success": True, "settings": masked})
 
@@ -691,14 +798,15 @@ class SpotifyStatusChannel:
         async def update_settings(payload: Dict[str, Any]):
             spotify_cfg = self.config.setdefault("spotify", {})
             updated = False
-            for key in ("client_id", "client_secret", "redirect_uri", "market", "additional_types"):
+            for key in ("client_id", "client_secret", "redirect_uri", "market", "additional_types", "render_mode"):
                 if key in payload:
                     spotify_cfg[key] = payload[key]
                     updated = True
             if updated:
                 self._save_settings(self.config)
-                # Reinitialize client after updating credentials
-                self._initialize_spotify_client()
+                # Reinitialize client only if credentials touched
+                if any(k in payload for k in ("client_id", "client_secret")):
+                    self._initialize_spotify_client()
             return JSONResponse({"success": True, "updated": updated})
 
         # ---------------- OAuth Initiation -----------------
