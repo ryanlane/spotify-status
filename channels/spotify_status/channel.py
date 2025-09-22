@@ -14,12 +14,44 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
-from PIL import Image
-from .renderer import PillowRenderer, RenderOptions
-from .svg_renderer import SvgRenderer
-from .service import SpotifyService
-from .models import TrackInfo
-from .push import PushManager
+import sys
+from PIL import Image  # type: ignore
+
+# ---------------------------------------------------------------------------
+# Flexible intra-plugin imports
+# When the channel module is loaded via importlib.spec_from_file_location with a
+# synthetic module name (not a real package), relative imports (e.g. `.renderer`)
+# will fail. We defensively inject the current directory into sys.path and try
+# relative first (for IDE friendliness) then absolute fallback.
+# ---------------------------------------------------------------------------
+_PLUGIN_DIR = Path(__file__).parent
+if str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
+
+try:  # Preferred (works if package context established)
+    from .renderer import PillowRenderer, RenderOptions  # type: ignore
+except Exception:  # noqa: BLE001
+    from renderer import PillowRenderer, RenderOptions  # type: ignore
+
+try:
+    from .svg_renderer import SvgRenderer  # type: ignore
+except Exception:  # noqa: BLE001
+    from svg_renderer import SvgRenderer  # type: ignore
+
+try:
+    from .service import SpotifyService  # type: ignore
+except Exception:  # noqa: BLE001
+    from service import SpotifyService  # type: ignore
+
+try:
+    from .models import TrackInfo  # type: ignore
+except Exception:  # noqa: BLE001
+    from models import TrackInfo  # type: ignore
+
+try:
+    from .push import PushManager  # type: ignore
+except Exception:  # noqa: BLE001
+    from push import PushManager  # type: ignore
 
 _SPOTIPY_AVAILABLE = False
 spotipy = None  # type: ignore
