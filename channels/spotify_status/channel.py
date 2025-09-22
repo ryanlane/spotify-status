@@ -48,6 +48,9 @@ def _import_local(module_name: str, file_name: Optional[str] = None) -> ModuleTy
         logger.error("[SpotifyStatusChannel] Failed creating spec module=%s path=%s", module_name, target)
         raise ImportError(f"Cannot load spec for {target}")
     module = importlib.util.module_from_spec(spec)
+    # Ensure module is visible in sys.modules BEFORE execution so decorators (e.g., @dataclass)
+    # that inspect sys.modules[cls.__module__] during class creation can resolve the module.
+    sys.modules[unique_name] = module
     try:
         spec.loader.exec_module(module)  # type: ignore[assignment]
     except Exception as e:  # noqa: BLE001
