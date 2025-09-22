@@ -298,7 +298,8 @@ class SpotifyStatusChannel:
                     "update_modes": ["scheduler", "push"],
                     "preferred_mode": "push",
                     "push_supported": True,
-                    "push_event_types": ["now_playing_changed", "playback_state_changed"],
+                    # Only metadata (track/artist/album) changes trigger events now.
+                    "push_event_types": ["now_playing_changed"],
                     "push_poll_interval": self.push_poll_interval
                 },
                 "configuration": {
@@ -480,9 +481,8 @@ class SpotifyStatusChannel:
         if self._push_manager is None:
             self._push_manager = PushManager(
                 poll_interval=self.push_poll_interval,
-                get_track=lambda: self.get_current_track(),
-                webhook_url=self.webhook_url,
-                logger=logger,
+                get_current_track=lambda: self.get_current_track(),
+                webhook_url_getter=lambda: self.webhook_url,
             )
 
     def register_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:

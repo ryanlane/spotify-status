@@ -29,6 +29,10 @@ class PushManager:
         self._stop = threading.Event()
         self._last_track_id: Optional[str] = None
         self._last_is_playing: Optional[bool] = None
+        # Track last textual metadata so we only emit on meaningful song changes.
+        self._last_artist_name: Optional[str] = None
+        self._last_album_name: Optional[str] = None
+        self._last_track_name: Optional[str] = None
         self._consecutive_errors = 0
 
     # Listener management -------------------------------------------------
@@ -86,11 +90,23 @@ class PushManager:
             return False
         track_id = track.get("track_id")
         is_playing = track.get("is_playing")
-        changed_track = track_id and track_id != self._last_track_id
-        changed_state = is_playing != self._last_is_playing
-        if not force and not (changed_track or changed_state):
+        # Normalize possible key variants produced upstream
+        artist_name = track.get("artist") or track.get("artist_name")
+        album_name = track.get("album") or track.get("album_name")
+        track_name = track.get("name") or track.get("track_name")
+
+        # Determine changes (metadata only, per new requirement)
+        changed_track_id = bool(track_id and track_id != self._last_track_id)
+        changed_artist = artist_name != self._last_artist_name
+        changed_album = album_name != self._last_album_name
+        changed_title = track_name != self._last_track_name
+        metadata_changed = changed_track_id or changed_artist or changed_album or changed_title
+
+        # Only emit when metadata changed, unless force=True
+        if not force and not metadata_changed:
             return False
-        event_type = "now_playing_changed" if changed_track else "playback_state_changed"
+
+        event_type = "now_playing_changed"
         event = {
             "channel_id": "com.spotify.status",
             "event_type": event_type,
@@ -100,6 +116,9 @@ class PushManager:
         }
         self._last_track_id = track_id
         self._last_is_playing = is_playing  # type: ignore[assignment]
+        self._last_artist_name = artist_name
+        self._last_album_name = album_name
+        self._last_track_name = track_name
         self._dispatch(event)
         return True
 
