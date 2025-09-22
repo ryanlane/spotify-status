@@ -503,7 +503,18 @@ class SpotifyStatusChannel:
     # ...existing code...
     def get_router(self) -> APIRouter:
         """Delegate to external routes factory for cleaner separation."""
-        from .routes import build_router  # local import to avoid circular at import time
+        # Some dynamic import contexts (importlib.spec_from_file_location) don't establish
+        # a proper package for relative imports. Mirror the defensive pattern used at the
+        # top of this module so router construction doesn't fail silently in discovery,
+        # which would prevent the `/manifest` endpoint from being mounted (404s observed).
+        try:  # Preferred relative form
+            from .routes import build_router  # type: ignore
+        except Exception:  # noqa: BLE001
+            try:
+                from routes import build_router  # type: ignore
+            except Exception as e:  # noqa: BLE001
+                logger.error("[SpotifyStatusChannel] Failed importing build_router: %s", e)
+                raise
         return build_router(self)
 
     # =========================================================================
