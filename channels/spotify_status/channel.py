@@ -26,7 +26,9 @@ from PIL import Image  # type: ignore
 # ---------------------------------------------------------------------------
 _PLUGIN_DIR = Path(__file__).parent
 if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
+    # Append instead of inserting at index 0 to avoid overshadowing other plugin
+    # modules with common names like "models" when they perform bare imports.
+    sys.path.append(str(_PLUGIN_DIR))
 
 try:  # Preferred (works if package context established)
     from .renderer import PillowRenderer, RenderOptions  # type: ignore
@@ -247,8 +249,13 @@ class SpotifyStatusChannel:
                     self.token_info = token_info
                     self.spotify_client = spotipy.Spotify(auth_manager=auth_manager)
                     # Defer import to avoid circular during module load (already imported at top, safe reuse)
-                    from .service import SpotifyService  # local import for clarity
-                    self.spotify_service = SpotifyService(self.spotify_client, cache_ttl=self.cache_duration)
+                    # Reuse already imported SpotifyService (avoid relative import that
+                    # fails when module lacks package context during dynamic loading).
+                    try:
+                        self.spotify_service = SpotifyService(self.spotify_client, cache_ttl=self.cache_duration)
+                    except Exception as svc_e:  # noqa: BLE001
+                        logger.error("[SpotifyStatusChannel] Failed initializing SpotifyService: %s", svc_e)
+                        self.spotify_service = None
                     logger.info("Spotify client initialized from cached token (service ready)")
                 else:
                     # Not yet authorized; keep auth_manager handy for later callback use
