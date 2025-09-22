@@ -16,8 +16,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
 import sys
 import importlib.util
+import traceback
 from types import ModuleType
 from PIL import Image  # type: ignore
+
+# Configure logging early so utility import function can emit diagnostics.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 _PLUGIN_DIR = Path(__file__).parent
@@ -26,49 +31,75 @@ if str(_PLUGIN_DIR) not in sys.path:
     sys.path.append(str(_PLUGIN_DIR))
 
 def _import_local(module_name: str, file_name: Optional[str] = None) -> ModuleType:
-    """Import a sibling module by explicit path, avoiding fragile relative imports.
+    """Import a sibling module by explicit path with diagnostic logging.
 
-    This bypasses Python's package-relative resolution so the plugin can be
-    safely loaded via importlib with any synthetic module name.
+    Adds granular start/end logging so we can pinpoint failures happening during
+    module execution (e.g., class decorators, dataclass processing, or import
+    side-effects) that previously surfaced only as a generic plugin load error.
     """
     target = _PLUGIN_DIR / (file_name or f"{module_name}.py")
+    logger.debug("[SpotifyStatusChannel] BEGIN import module=%s path=%s", module_name, target)
     if not target.exists():
+        logger.error("[SpotifyStatusChannel] Missing module file module=%s path=%s", module_name, target)
         raise ImportError(f"Local module file not found: {target}")
     unique_name = f"spotify_status_{module_name}"
     spec = importlib.util.spec_from_file_location(unique_name, target)
     if spec is None or spec.loader is None:
+        logger.error("[SpotifyStatusChannel] Failed creating spec module=%s path=%s", module_name, target)
         raise ImportError(f"Cannot load spec for {target}")
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)  # type: ignore[assignment]
     except Exception as e:  # noqa: BLE001
+        tb = traceback.format_exc()
+        logger.error("[SpotifyStatusChannel] Exception executing module=%s path=%s error=%s\n%s", module_name, target, e, tb)
         raise ImportError(f"Failed executing {target}: {e}") from e
+    logger.debug("[SpotifyStatusChannel] END import module=%s path=%s", module_name, target)
     return module
 
 # Load local modules explicitly (no relative import usage)
-renderer_mod = _import_local("renderer")
-PillowRenderer = getattr(renderer_mod, "PillowRenderer")
-RenderOptions = getattr(renderer_mod, "RenderOptions")
+try:
+    renderer_mod = _import_local("renderer")
+    PillowRenderer = getattr(renderer_mod, "PillowRenderer")
+    RenderOptions = getattr(renderer_mod, "RenderOptions")
+except Exception as e:  # noqa: BLE001
+    logger.error("[SpotifyStatusChannel] Failed loading renderer module: %s", e)
+    raise
 
-svg_renderer_mod = _import_local("svg_renderer")
-SvgRenderer = getattr(svg_renderer_mod, "SvgRenderer")
+try:
+    svg_renderer_mod = _import_local("svg_renderer")
+    SvgRenderer = getattr(svg_renderer_mod, "SvgRenderer")
+except Exception as e:  # noqa: BLE001
+    logger.warning("[SpotifyStatusChannel] SVG renderer unavailable (%s) – continuing without SVG", e)
+    class SvgRenderer:  # type: ignore
+        available = False
 
-service_mod = _import_local("service")
-SpotifyService = getattr(service_mod, "SpotifyService")
+try:
+    service_mod = _import_local("service")
+    SpotifyService = getattr(service_mod, "SpotifyService")
+except Exception as e:  # noqa: BLE001
+    logger.error("[SpotifyStatusChannel] Failed loading service module: %s", e)
+    raise
 
-models_mod = _import_local("models", file_name="models.py") if (_PLUGIN_DIR / "models.py").exists() else _import_local("models")
-TrackInfo = getattr(models_mod, "TrackInfo")
+try:
+    models_mod = _import_local("models", file_name="models.py") if (_PLUGIN_DIR / "models.py").exists() else _import_local("models")
+    TrackInfo = getattr(models_mod, "TrackInfo")
+except Exception as e:  # noqa: BLE001
+    logger.error("[SpotifyStatusChannel] Failed loading models module: %s", e)
+    raise
 
-push_mod = _import_local("push")
-PushManager = getattr(push_mod, "PushManager")
+try:
+    push_mod = _import_local("push")
+    PushManager = getattr(push_mod, "PushManager")
+except Exception as e:  # noqa: BLE001
+    logger.error("[SpotifyStatusChannel] Failed loading push module: %s", e)
+    raise
 
 _SPOTIPY_AVAILABLE = False
 spotipy = None  # type: ignore
 SpotifyOAuth = None  # type: ignore
 
-# We need logging configured before we can safely log missing dependency status
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# (logging configured above)
 
 # Remove generic module names that may pollute global import space if an older
 # version of this plugin was previously loaded (pre-sandbox). This prevents
