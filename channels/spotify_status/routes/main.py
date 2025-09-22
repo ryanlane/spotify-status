@@ -1,8 +1,6 @@
 """FastAPI route construction for Spotify Status Channel.
 
-This isolates endpoint definitions from the core channel orchestration logic to
-reduce file size and improve testability (we can import build_router and supply
-stub channel objects in tests).
+Moved from top-level routes.py to routes/main.py for clearer structure.
 """
 from __future__ import annotations
 
@@ -11,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-# Type protocol (narrow) that channel must satisfy for routes.
+
 class ChannelProtocol:  # pragma: no cover - structural typing hint
     config: Dict[str, Any]
     spotify_client: Any
@@ -33,9 +31,9 @@ class ChannelProtocol:  # pragma: no cover - structural typing hint
 
 
 def build_router(channel: ChannelProtocol) -> APIRouter:
+    # (Content identical to previous routes.py implementation)
     router = APIRouter()
 
-    # Settings --------------------------------------------------------------
     @router.get("/settings")
     async def get_settings():  # noqa: D401
         cfg = channel.config.get("spotify", {})
@@ -68,10 +66,9 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
                 channel._initialize_spotify_client()
         return JSONResponse({"success": True, "updated": updated})
 
-    # OAuth -----------------------------------------------------------------
     @router.get("/authorize")
     async def authorize():  # noqa: D401
-        from spotipy.oauth2 import SpotifyOAuth  # lazy import so degraded mode still loads
+        from spotipy.oauth2 import SpotifyOAuth  # lazy
         cfg = channel.config.get("spotify", {})
         client_id = cfg.get("client_id")
         client_secret = cfg.get("client_secret")
@@ -96,7 +93,6 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"Failed to build authorize URL: {e}")
 
-    # Current Track ---------------------------------------------------------
     @router.get("/current-track")
     async def current_track():  # noqa: D401
         try:
@@ -107,7 +103,6 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"Failed to get current track: {e}")
 
-    # Auth callback (new + legacy) ------------------------------------------
     async def _handle_auth_callback(request: Request):
         if channel.degraded:
             raise HTTPException(status_code=500, detail="Spotipy dependency missing; cannot authorize")
@@ -136,7 +131,7 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
         scope = "user-read-currently-playing user-read-playback-state"
         if not (client_id and client_secret):
             raise HTTPException(status_code=400, detail="Client credentials not configured")
-        from spotipy.oauth2 import SpotifyOAuth  # local import
+        from spotipy.oauth2 import SpotifyOAuth  # local
         last_error: Optional[str] = None
         for attempt_idx, attempted_redirect in enumerate(redirect_fallbacks, start=1):
             try:
@@ -187,7 +182,6 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
     async def callback_legacy_post(request: Request):  # noqa: D401
         return await _handle_auth_callback(request)
 
-    # Authorization status & redirects -------------------------------------
     @router.get("/authorize/status")
     async def authorize_status():  # noqa: D401
         return JSONResponse({
@@ -215,7 +209,6 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
             "note": "Order reflects fallback attempt priority in callback handler"
         })
 
-    # Core contract endpoints -----------------------------------------------
     @router.get("/manifest")
     async def manifest_endpoint():  # noqa: D401
         return JSONResponse(channel.get_manifest())
@@ -237,7 +230,6 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
             "poll_interval": channel.push_poll_interval,
         })
 
-    # Feature detection -----------------------------------------------------
     def _test_payload() -> Dict[str, Any]:
         return {
             "success": True,
@@ -255,14 +247,12 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
     async def test_get():  # noqa: D401
         return JSONResponse(_test_payload())
 
-    # Compatibility alias ---------------------------------------------------
     @router.post("/image_request")
     async def request_image_compat(payload: Dict[str, Any] | None = None):  # noqa: D401
         result = await channel.request_image(payload or {})
         result["compat_endpoint"] = True
         return JSONResponse(result)
 
-    # Static UI -------------------------------------------------------------
     try:
         router.mount("/ui", StaticFiles(directory=str(channel.ui_dir)), name="ui")
     except Exception:  # noqa: BLE001
@@ -296,7 +286,6 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
             raise HTTPException(status_code=404, detail="index.html not found")
         return FileResponse(str(path), media_type="text/html")
 
-    # Debug -----------------------------------------------------------------
     @router.get("/ui/debug-list")
     async def ui_debug_list():  # noqa: D401
         if not channel.ui_dir.exists():
@@ -320,7 +309,6 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
     async def ui_ping():  # noqa: D401
         return JSONResponse({"ok": True, "message": "spotify ui router active"})
 
-    # Push status & trigger (delegated to push manager) ---------------------
     @router.get("/push/status")
     async def push_status():  # noqa: D401
         pm = getattr(channel, "_push_manager", None)

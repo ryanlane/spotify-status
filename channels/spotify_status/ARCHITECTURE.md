@@ -6,7 +6,7 @@ The plugin has been refactored to a modular, test‑friendly structure separatin
 | Module | Responsibility |
 | ------ | -------------- |
 | `channel.py` | Orchestrator: lifecycle, settings persistence, manifest/status aggregation, image request entry point, push manager bootstrap. |
-| `routes.py` | FastAPI router factory (`build_router(channel)`) – all HTTP endpoint definitions isolated from core logic. |
+| `routes/` | Package containing FastAPI router factory in `routes/main.py` (`build_router(channel)`) – HTTP endpoints isolated from core logic. |
 | `renderer.py` | Pillow renderer: builds status / fallback images (album art, text, progress bar). |
 | `svg_renderer.py` | Optional SVG → PNG pipeline (Jinja2 templates + CairoSVG rasterization) with graceful fallback if deps missing. |
 | `models.py` | Data model (`TrackInfo`) encapsulating normalized track/playback metadata. |
@@ -70,4 +70,4 @@ If `spotipy` is missing the channel reports `degraded=True`; rendering still wor
 * Measurable caching scope (service-level only).
 
 ---
-Last updated: Refactor introducing `routes.py`, SVG rendering, and metadata-only push events.
+Last updated: Relocated `routes.py` into `routes/main.py` package; includes SVG rendering and metadata-only push events.
