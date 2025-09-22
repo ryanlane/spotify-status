@@ -1,0 +1,45 @@
+{% set W = width %}{% set H = height %}
+<svg xmlns="http://www.w3.org/2000/svg" width="{{ W }}" height="{{ H }}" viewBox="0 0 {{ W }} {{ H }}" version="1.1">
+  <defs>
+    <style><![CDATA[
+      .bg { fill: {{ '#ffffff' if theme == 'light' else '#111418' }}; }
+      .fg { fill: {{ '#111418' if theme == 'light' else '#f5f7fa' }}; font-family: 'Arial','Helvetica',sans-serif; }
+      .muted { fill: {{ '#5a636e' if theme == 'light' else '#9aa4af' }}; font-family: 'Arial','Helvetica',sans-serif; }
+      .accent { fill: #1db954; }
+      .bar-bg { fill: {{ '#e5e7eb' if theme == 'light' else '#1e2530' }}; }
+      .bar-fill { fill: {{ '#111418' if theme == 'light' else '#f5f7fa' }}; }
+      .small { font-size: 20px; }
+      .medium { font-size: 28px; font-weight: 500; }
+      .large { font-size: 46px; font-weight: 600; }
+      .title { font-size: 52px; font-weight: 600; }
+    ]]></style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="100%" height="100%"/>
+  {% if has_track %}
+    {% set pad = (W * 0.07)|int %}
+    {% set artSize = (W * 0.55)|int %}
+    {% if artSize > (H * 0.55) %}{% set artSize = (H * 0.55)|int %}{% endif %}
+    {% set artX = (W - artSize)//2 %}
+    {% set artY = pad %}
+    <rect x="{{ artX }}" y="{{ artY }}" width="{{ artSize }}" height="{{ artSize }}" rx="20" ry="20" fill="{{ '#eceff3' if theme == 'light' else '#222831' }}"/>
+    {% if album_art_url %}
+      <image x="{{ artX }}" y="{{ artY }}" width="{{ artSize }}" height="{{ artSize }}" preserveAspectRatio="xMidYMid slice" href="{{ album_art_url }}"/>
+    {% endif %}
+    {% set textY = artY + artSize + 70 %}
+    <text x="50%" y="{{ textY }}" text-anchor="middle" class="fg title">{{ track_name }}</text>
+    <text x="50%" y="{{ textY + 60 }}" text-anchor="middle" class="muted medium">{{ artist_name }}</text>
+    <text x="50%" y="{{ textY + 100 }}" text-anchor="middle" class="muted small">{{ album_name }}</text>
+    {% set barW = (W * 0.70)|int %}
+    {% set barH = 30 %}
+    {% set barX = (W - barW)//2 %}
+    {% set barY = textY + 150 %}
+    <rect x="{{ barX }}" y="{{ barY }}" width="{{ barW }}" height="{{ barH }}" rx="15" class="bar-bg" />
+    <rect x="{{ barX }}" y="{{ barY }}" width="{{ (barW * (progress_pct/100))|int }}" height="{{ barH }}" rx="15" class="accent" />
+    <text x="50%" y="{{ barY - 18 }}" text-anchor="middle" class="muted small">{{ (progress_ms // 60000) }}:{{ '%02d' % ((progress_ms // 1000) % 60) }} / {{ (duration_ms // 60000) }}:{{ '%02d' % ((duration_ms // 1000) % 60) }}</text>
+    <text x="50%" y="{{ barY + barH + 52 }}" text-anchor="middle" class="muted small">{{ 'Playing' if is_playing else 'Paused' }} • {{ device }}</text>
+  {% else %}
+    <text x="50%" y="40%" text-anchor="middle" class="muted large" font-size="140">♪</text>
+    <text x="50%" y="58%" text-anchor="middle" class="fg title">No music</text>
+    <text x="50%" y="70%" text-anchor="middle" class="muted medium">Start Spotify</text>
+  {% endif %}
+</svg>
