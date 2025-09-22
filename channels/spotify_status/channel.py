@@ -70,6 +70,20 @@ SpotifyOAuth = None  # type: ignore
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Remove generic module names that may pollute global import space if an older
+# version of this plugin was previously loaded (pre-sandbox). This prevents
+# other plugins that do 'import models' from accidentally binding to our
+# TrackInfo-only module instead of their own richer models module.
+_possibly_conflicting = ["models", "service", "renderer", "push", "svg_renderer"]
+for _name in _possibly_conflicting:
+    _m = sys.modules.get(_name)
+    try:
+        if _m and getattr(_m, "__file__", "").startswith(str(_PLUGIN_DIR)):
+            del sys.modules[_name]
+            logger.debug("[SpotifyStatusChannel] Removed stray global module alias '%s'", _name)
+    except Exception:  # noqa: BLE001
+        pass
+
 try:  # Optional dependency guard so router still mounts even if spotipy missing
     import spotipy  # type: ignore
     from spotipy.oauth2 import SpotifyOAuth  # type: ignore
@@ -515,19 +529,16 @@ class SpotifyStatusChannel:
     # ...existing code...
     def get_router(self) -> APIRouter:
         """Delegate to external routes factory for cleaner separation."""
-        # Some dynamic import contexts (importlib.spec_from_file_location) don't establish
-        # a proper package for relative imports. Mirror the defensive pattern used at the
-        # top of this module so router construction doesn't fail silently in discovery,
-        # which would prevent the `/manifest` endpoint from being mounted (404s observed).
-        try:  # Preferred relative form
-            from .routes import build_router  # type: ignore
-        except Exception:  # noqa: BLE001
-            try:
-                from routes import build_router  # type: ignore
-            except Exception as e:  # noqa: BLE001
-                logger.error("[SpotifyStatusChannel] Failed importing build_router: %s", e)
-                raise
-        return build_router(self)
+        # Load routes/main.py explicitly by file path to avoid relative import
+        # issues when the plugin is loaded under a synthetic module name.
+        try:
+            routes_mod = _import_local("routes/main", file_name="routes/main.py")
+            build_router = getattr(routes_mod, "build_router")
+            logger.debug("[SpotifyStatusChannel] build_router loaded via explicit path")
+            return build_router(self)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[SpotifyStatusChannel] Failed to construct router: %s", e)
+            raise
 
     # =========================================================================
     # Push / Event Streaming (delegated to PushManager)
