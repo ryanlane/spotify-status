@@ -80,9 +80,9 @@ trap cleanup EXIT
 if [[ $PRESERVE_AUTH -eq 1 ]]; then
 	echo "Backing up auth-related files (if present): ${AUTH_FILES[*]}"
 	for f in "${AUTH_FILES[@]}"; do
-		if [[ -f "${DST}/${f}" ]]; then
+		if ${SUDO} test -f "${DST}/${f}"; then
 			mkdir -p "${TMP_BACKUP}/$(dirname "$f")"
-			cp -p "${DST}/${f}" "${TMP_BACKUP}/${f}" || true
+			${SUDO} cp -p "${DST}/${f}" "${TMP_BACKUP}/${f}" || true
 		fi
 	done
 fi
@@ -102,14 +102,14 @@ if [[ $PRESERVE_AUTH -eq 1 ]]; then
 	for f in "${AUTH_FILES[@]}"; do
 		if [[ -f "${TMP_BACKUP}/${f}" ]]; then
 			mkdir -p "${DST}/$(dirname "$f")"
-			cp -p "${TMP_BACKUP}/${f}" "${DST}/${f}" || true
+			${SUDO} cp -p "${TMP_BACKUP}/${f}" "${DST}/${f}" || true
 			${SUDO} chown mimir:mimir "${DST}/${f}" || true
 		fi
 	done
 elif [[ $RESET_AUTH -eq 1 ]]; then
 	echo "Resetting auth cache files (${AUTH_FILES[*]})"
 	for f in "${AUTH_FILES[@]}"; do
-		rm -f "${DST}/${f}" || true
+		${SUDO} rm -f "${DST}/${f}" || true
 	done
 fi
 
