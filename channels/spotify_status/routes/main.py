@@ -351,4 +351,92 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
         changed = pm.force_emit() if pm else False
         return JSONResponse({"forced": True, "emitted": changed})
 
+    # ------------------------------------------------------------------
+    # Diagnostics – verify deployment files and hashes
+    # ------------------------------------------------------------------
+    def _file_info(path):
+        from pathlib import Path
+        import hashlib, time
+        p = Path(path)
+        info = {"path": str(p), "exists": p.exists()}
+        if not p.exists():
+            return info
+        try:
+            st = p.stat()
+            info.update({
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "age_sec": (time.time() - st.st_mtime),
+            })
+            # Compute sha256 (bounded size small enough for our files)
+            h = hashlib.sha256()
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            info["sha256"] = h.hexdigest()
+        except Exception as e:  # noqa: BLE001
+            info["error"] = str(e)
+        return info
+
+    @router.get("/diagnostics/files")
+    async def diagnostics_files():  # noqa: D401
+        from pathlib import Path
+        import importlib
+        base_dir = Path(__file__).resolve().parent.parent
+        ui_dir = getattr(channel, "ui_dir", base_dir / "ui")
+        targets = {
+            "channel.py": base_dir / "channel.py",
+            "renderer.py": base_dir / "renderer.py",
+            "svg_renderer.py": base_dir / "svg_renderer.py",
+            "push.py": base_dir / "push.py",
+            "service.py": base_dir / "service.py",
+            "routes/main.py": Path(__file__).resolve(),
+            "ui/index.esm.js": ui_dir / "index.esm.js",
+            "ui/manage.esm.js": ui_dir / "manage.esm.js",
+        }
+        files = {name: _file_info(path) for name, path in targets.items()}
+        # Imported module file paths (when resolvable)
+        def mod_path(modname):
+            try:
+                m = importlib.import_module(modname)
+                return getattr(m, "__file__", None)
+            except Exception:
+                return None
+        modules = {
+            "channels.spotify_status.channel": mod_path("channels.spotify_status.channel"),
+            "channels.spotify_status.renderer": mod_path("channels.spotify_status.renderer"),
+            "channels.spotify_status.push": mod_path("channels.spotify_status.push"),
+            "channels.spotify_status.service": mod_path("channels.spotify_status.service"),
+            "channels.spotify_status.svg_renderer": mod_path("channels.spotify_status.svg_renderer"),
+            "channels.spotify_status.routes.main": mod_path("channels.spotify_status.routes.main"),
+        }
+        return JSONResponse({
+            "base_dir": str(base_dir),
+            "ui_dir": str(ui_dir),
+            "files": files,
+            "modules": modules,
+        })
+
+    @router.get("/diagnostics/summary")
+    async def diagnostics_summary():  # noqa: D401
+        # Compact view: renderer + ui mtimes and hashes (if available)
+        from pathlib import Path
+        base_dir = Path(__file__).resolve().parent.parent
+        ui_dir = getattr(channel, "ui_dir", base_dir / "ui")
+        focus = [
+            ("renderer.py", base_dir / "renderer.py"),
+            ("channel.py", base_dir / "channel.py"),
+            ("push.py", base_dir / "push.py"),
+            ("service.py", base_dir / "service.py"),
+            ("ui/index.esm.js", ui_dir / "index.esm.js"),
+            ("ui/manage.esm.js", ui_dir / "manage.esm.js"),
+        ]
+        out = {name: _file_info(path) for name, path in focus}
+        return JSONResponse({
+            "success": True,
+            "base_dir": str(base_dir),
+            "ui_dir": str(ui_dir),
+            "artifacts": out,
+        })
+
     return router
