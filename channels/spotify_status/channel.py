@@ -6,6 +6,7 @@ Integrates with Spotify Web API to fetch real-time listening status.
 """
 
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -241,6 +242,9 @@ class SpotifyStatusChannel:
         self._svg_renderer = SvgRenderer(self.channel_dir / "svg")
         # Track last emitted fingerprint for scheduler-friendly distribution hints
         self._last_track_fingerprint = None
+        # In-memory render cache to keep bytes stable when content unchanged
+        # key: f"{fp}|{width}x{height}|{'g' if grayscale else 'c'}|{render_mode}"
+        self._image_cache = {}
 
         # --- Push / Event streaming support (poll + dispatch) ---
         # We present a very light-weight push abstraction so the host API service
@@ -617,6 +621,46 @@ class SpotifyStatusChannel:
                     image = self._renderer.create_no_music_image(RenderOptions(width=width, height=height, grayscale=grayscale_flag))
                     description = "No music currently playing on Spotify"
 
+            # Build a content fingerprint independent of progress/time to decide cache use
+            cache_key = f"{current_fp}|{width}x{height}|{'g' if grayscale_flag else 'c'}|{('svg' if render_mode == 'svg' and self._svg_renderer.available else 'pillow')}"
+            cached = self._image_cache.get(cache_key)
+            if cached is not None:
+                steps.append("cache_hit")
+                # Return a response assembled from cache; include latest track_info and timestamps
+                result: Dict[str, Any] = {
+                    "success": True,
+                    "format": cached["format"],
+                    "width": width,
+                    "height": height,
+                    "description": cached["description"],
+                    "track_info": track_info,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "steps": steps,
+                    "bytes": cached["bytes"],
+                    "content_type": cached["content_type"],
+                    "sha256": cached["sha256"],
+                    "preferred_transport": "bytes",
+                    "image": {
+                        "bytes": cached["bytes"],
+                        "content_type": cached["content_type"],
+                        "format": cached["format"],
+                        "width": width,
+                        "height": height,
+                        "description": cached["description"],
+                        "track_info": track_info,
+                        "distribution_mode": distribution_mode,
+                        "content_fingerprint": current_fp,
+                        "sha256": cached["sha256"],
+                        "preferred_transport": "bytes",
+                    },
+                    "grayscale": grayscale_flag,
+                    "render_mode": ("svg" if render_mode == "svg" and self._svg_renderer.available else "pillow"),
+                    "content_fingerprint": current_fp,
+                }
+                # Update fingerprint for next call
+                self._last_track_fingerprint = current_fp
+                return result
+
             if grayscale_flag:
                 try:
                     steps.append("apply_grayscale")
@@ -637,6 +681,8 @@ class SpotifyStatusChannel:
                 out_format = 'png'
                 content_type = 'image/png'
             raw_bytes = buffer.getvalue()
+            # Compute stable hash of bytes to help upstream dedupe/diagnostics
+            sha256 = hashlib.sha256(raw_bytes).hexdigest()
 
             image_base64: Optional[str] = None
             if include_base64_flag and not suppress_legacy:
@@ -656,6 +702,7 @@ class SpotifyStatusChannel:
                 # Back-compat (some consumers may still read top-level fields)
                 "bytes": raw_bytes,
                 "content_type": content_type,
+                "sha256": sha256,
                 "preferred_transport": "bytes",
                 # New nested image object for scheduler/scene refresh service
                 "image": {
@@ -667,11 +714,23 @@ class SpotifyStatusChannel:
                     "description": description,
                     "track_info": track_info,
                     "distribution_mode": distribution_mode,
+                    "content_fingerprint": current_fp,
+                    "sha256": sha256,
                     "preferred_transport": "bytes",
                 },
                 "grayscale": grayscale_flag,
                 "render_mode": ("svg" if render_mode == "svg" and self._svg_renderer.available else "pillow"),
+                "content_fingerprint": current_fp,
             }
+            # Populate cache for identical future requests
+            self._image_cache[cache_key] = {
+                "bytes": raw_bytes,
+                "content_type": content_type,
+                "format": out_format,
+                "sha256": sha256,
+                "description": description,
+            }
+
             if image_base64 is not None:
                 # maintain legacy pathway (string) while keeping dict for new pipeline
                 result["image_base64"] = image_base64
