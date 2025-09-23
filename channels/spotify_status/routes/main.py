@@ -85,7 +85,7 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
                 client_secret=client_secret,
                 redirect_uri=redirect_uri,
                 scope=scope,
-                cache_path=str(channel.ui_dir.parent / "data" / ".spotify_cache"),
+                cache_path=str(getattr(channel, "token_path", channel.ui_dir.parent / "data" / ".spotify_cache")),
                 show_dialog=True,
             )
             auth_url = auth_manager.get_authorize_url()
@@ -140,7 +140,7 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
                     client_secret=client_secret,
                     redirect_uri=attempted_redirect,
                     scope=scope,
-                    cache_path=str(channel.ui_dir.parent / "data" / ".spotify_cache")
+                    cache_path=str(getattr(channel, "token_path", channel.ui_dir.parent / "data" / ".spotify_cache"))
                 )
                 try:
                     token_info = auth_manager.get_access_token(code)  # type: ignore[arg-type]
@@ -217,6 +217,21 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
             "current": current,
             "candidates": ordered,
             "note": "Order reflects fallback attempt priority in callback handler"
+        })
+
+    @router.get("/authorize/cache-info")
+    async def cache_info():  # noqa: D401
+        import os, time  # local to avoid unused warnings in environments without route hits
+        token_path = getattr(channel, "token_path", channel.ui_dir.parent / "data" / ".spotify_cache")
+        exists = token_path.exists()
+        stat = token_path.stat() if exists else None
+        return JSONResponse({
+            "path": str(token_path),
+            "exists": exists,
+            "size": stat.st_size if stat else None,
+            "mtime": stat.st_mtime if stat else None,
+            "age_sec": (time.time() - stat.st_mtime) if stat else None,
+            "writable": os.access(token_path.parent, os.W_OK),
         })
 
     @router.get("/manifest")

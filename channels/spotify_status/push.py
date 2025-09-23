@@ -59,6 +59,15 @@ class PushManager:
         self._last_album_name: Optional[str] = None
         self._last_track_name: Optional[str] = None
         self._consecutive_errors = 0
+        # Fingerprint of last emitted metadata (track boundary key fields). Progress
+        # changes alone should *not* generate events; some Spotify clients update
+        # progress every few seconds which would otherwise spam the API service.
+        self._last_fingerprint: Optional[str] = None
+        # Optional minimum spacing between identical metadata re-emits (defensive).
+        self._min_emit_interval = float(
+            (getattr(__import__('os'), 'environ', {}).get('SPOTIFY_STATUS_MIN_EMIT_INTERVAL') or 0)  # 0 disables
+        )
+        self._last_emit_ts: Optional[float] = None
 
     # Listener management -------------------------------------------------
     def add_listener(self, callback: Callable[[Dict[str, Any]], None]):
@@ -204,9 +213,25 @@ class PushManager:
                 self._dispatch(event)
                 # We continue to evaluate metadata_changed after, no return here.
 
-        # Only emit metadata event when metadata changed, unless forced
-        if not force and not metadata_changed:
-            # Update last play state for future state-change detection
+        # Build new fingerprint (only the stable identity fields)
+        fp_parts = [
+            str(track_id or ''),
+            str(artist_name or ''),
+            str(album_name or ''),
+            str(track_name or ''),
+        ]
+        fingerprint = '|'.join(fp_parts)
+
+        # Determine if we should emit: fingerprint changed OR forced OR transitioning from None
+        should_emit = force or metadata_changed or (self._last_fingerprint is None and fingerprint)
+
+        # Enforce optional min interval when fingerprint unchanged but force requested
+        if should_emit and not metadata_changed and not force and self._min_emit_interval > 0:
+            now_ts_check = time.time()
+            if self._last_emit_ts and (now_ts_check - self._last_emit_ts) < self._min_emit_interval:
+                should_emit = False
+
+        if not should_emit:
             self._last_is_playing = is_playing  # type: ignore[assignment]
             return False
 
@@ -223,6 +248,8 @@ class PushManager:
         self._last_artist_name = artist_name
         self._last_album_name = album_name
         self._last_track_name = track_name
+        self._last_fingerprint = fingerprint
+        self._last_emit_ts = time.time()
         self._dispatch(event)
         return True
 

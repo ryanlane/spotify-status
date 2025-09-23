@@ -12,6 +12,7 @@ import logging
 import requests
 import asyncio
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
 import sys
@@ -202,7 +203,26 @@ class SpotifyStatusChannel:
         self.data_dir = self.channel_dir / "data"
         self.ui_dir = self.channel_dir / "ui"
         self.settings_path = self.data_dir / "settings.json"
-        self.token_path = self.data_dir / ".spotify_cache"  # spotipy cache path
+        # Allow token/cache directory override via config or environment so a
+        # containerized deployment can mount a persistent volume and avoid
+        # re-authorization on every new container.
+        override_cache_dir = (
+            os.environ.get("SPOTIFY_STATUS_CACHE_DIR")
+            or self.config.get("spotify", {}).get("cache_dir")
+        )
+        if override_cache_dir:
+            override_cache_dir = str(override_cache_dir)
+            try:
+                Path(override_cache_dir).mkdir(parents=True, exist_ok=True)
+                self.token_path = Path(override_cache_dir) / ".spotify_cache"
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[SpotifyStatusChannel] Failed to use override cache_dir=%s falling back to local data dir",
+                    override_cache_dir,
+                )
+                self.token_path = self.data_dir / ".spotify_cache"
+        else:
+            self.token_path = self.data_dir / ".spotify_cache"  # spotipy cache path
         self.degraded = not _SPOTIPY_AVAILABLE
     # (HTML template rendering removed; previously set templates_dir/_template_env)
         
@@ -342,7 +362,7 @@ class SpotifyStatusChannel:
                 client_secret=client_secret,
                 redirect_uri=redirect_uri,
                 scope=scope,
-                cache_path=str(self.data_dir / ".spotify_cache")
+                cache_path=str(self.token_path)
             )
 
             # Attempt to read cached token (so re-init after restart picks up prior auth)
