@@ -1,0 +1,7 @@
+{
+  "Track Title": "{{ track_name }}",
+  "Artist Name": "{{ artist_name }}",
+  "Album Name": "{{ album_name }}",
+  "0:00 / 0:00": "{{ (progress_ms // 60000) }}:{{ '%02d' % ((progress_ms // 1000) % 60) }} / {{ (duration_ms // 60000) }}:{{ '%02d' % ((duration_ms // 1000) % 60) }}",
+  "Device • Playing": "Device: {{ device }} • {{ 'Playing' if is_playing else 'Paused' }}"
+}

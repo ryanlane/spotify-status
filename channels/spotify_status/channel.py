@@ -250,6 +250,12 @@ class SpotifyStatusChannel:
         if self.early_wake_offset_sec < 0.1:
             self.early_wake_offset_sec = 0.1
 
+        # Optional playback state (pause/resume) events
+        self.emit_playback_state_events = bool(se_spotify_cfg.get("emit_playback_state_events", False))
+        self.playback_state_debounce_sec = float(se_spotify_cfg.get("playback_state_debounce_sec", 1.0))
+        if self.playback_state_debounce_sec < 0.1:
+            self.playback_state_debounce_sec = 0.1
+
         # Optional outbound webhook (POST) – configured via settings.json ("webhook_url")
         self.webhook_url: Optional[str] = self.config.get("spotify", {}).get("webhook_url")
 
@@ -438,7 +444,11 @@ class SpotifyStatusChannel:
                     "preferred_mode": "push",
                     "push_supported": True,
                     # Only metadata (track/artist/album) changes trigger events now.
-                    "push_event_types": ["now_playing_changed", "now_playing_cleared"],
+                    "push_event_types": [
+                        "now_playing_changed",
+                        "now_playing_cleared",
+                        *( ["playback_state_changed"] if self.emit_playback_state_events else [] ),
+                    ],
                     "push_poll_interval": self.push_poll_interval
                 },
                 "configuration": {
@@ -480,6 +490,8 @@ class SpotifyStatusChannel:
                     "webhook_configured": bool(self.webhook_url),
                     "near_end_window_sec": self.near_end_window_sec,
                     "early_wake_offset_sec": self.early_wake_offset_sec,
+                    "emit_playback_state_events": self.emit_playback_state_events,
+                    "playback_state_debounce_sec": self.playback_state_debounce_sec,
                 }
             }
             
@@ -633,6 +645,10 @@ class SpotifyStatusChannel:
                 # Force uncached retrieval so we see track boundary promptly
                 get_current_track=lambda: self.spotify_service.get_current_track(force=True) if getattr(self, 'spotify_service', None) else None,
                 webhook_url_getter=lambda: self.webhook_url,
+                near_end_window_sec=self.near_end_window_sec,
+                early_wake_offset_sec=self.early_wake_offset_sec,
+                emit_playback_state_events=self.emit_playback_state_events,
+                playback_state_debounce_sec=self.playback_state_debounce_sec,
             )
 
     def register_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:

@@ -87,3 +87,62 @@ The platform will also call `request_image` internally to obtain the rendered al
 
 ## License
 Assumes same license as the containing repository unless overridden.
+
+## SVG Template Conversion (Figma -> Jinja2)
+A helper script `scripts/figma_svg_to_template.py` converts raw exported Figma SVGs into Jinja2 templates compatible with the channel's `SvgRenderer`.
+
+### Why
+Design tools export verbose SVG with duplicated inline styles. The script:
+- Consolidates repeated styles into a single `<style>` block with compact class names.
+- Replaces text literals with dynamic Jinja placeholders (track, artist, etc.).
+- Injects `{{ width }}` / `{{ height }}` placeholders for scalable rendering.
+- (Optional) Applies theme-aware color substitutions (e.g. light vs dark).
+
+### Basic Usage
+```
+python scripts/figma_svg_to_template.py input.svg -o svg/now_playing_new.svg.j2
+```
+
+### With Text & Theme Mapping
+```
+python scripts/figma_svg_to_template.py figma_now_playing.svg \
+  -o svg/now_playing_portrait_auto.svg.j2 \
+  --map "Track Title={{ track_name }}" "Artist Name={{ artist_name }}" \
+        "Album Name={{ album_name }}" \
+  --map "0:00 / 0:00={{ (progress_ms // 60000) }}:{{ '%02d' % ((progress_ms // 1000) % 60) }} / {{ (duration_ms // 60000) }}:{{ '%02d' % ((duration_ms // 1000) % 60) }}" \
+  --theme-substitute "#FFFFFF={{ '#ffffff' if theme == 'light' else '#111418' }}" \
+  --title "Auto Converted Portrait"
+```
+
+You can also provide a JSON mapping file (see `scripts/sample_text_mapping.json`):
+```
+python scripts/figma_svg_to_template.py figma_now_playing.svg \
+  -o svg/now_playing_portrait_auto.svg.j2 \
+  --map-json scripts/sample_text_mapping.json
+```
+
+### Color Theme Substitution
+Pass one or more `--theme-substitute` rules of the form:
+```
+COLOR=JINJA_EXPR
+```
+Example:
+```
+--theme-substitute "#000000={{ '#111418' if theme == 'light' else '#f5f7fa' }}" \
+                   "#FFFFFF={{ '#ffffff' if theme == 'light' else '#111418' }}"
+```
+If a class style contains that exact color value it will be replaced by the Jinja expression.
+
+### Output
+- The script writes a `.svg.j2` file starting with helper assignments: `{% set W = width %}{% set H = height %}`.
+- A `<defs><style><![CDATA[ ... ]]></style></defs>` block contains consolidated classes `.c1`, `.c2`, etc.
+- Original geometry and structure preserved (unsupported elements are left untouched).
+
+### Tips
+- Keep Figma export constrained to a single artboard for predictable dimensions.
+- After conversion you can manually rename classes or embed additional conditional logic.
+- Run through `SvgRenderer` by selecting render mode `svg` in requests.
+
+### Limitations
+- Does not auto-create multiple aspect ratio templates: run separately per design.
+- Only a limited set of style attributes consolidated (extend `STYLE_ATTRS` in script as needed).

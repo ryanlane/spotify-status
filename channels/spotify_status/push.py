@@ -10,6 +10,14 @@ import time
 import logging
 from typing import Callable, Dict, Any, List, Optional, Tuple
 
+try:  # Optional dependency (may be present in host environment)
+    import requests
+    from requests import RequestException
+except Exception:  # noqa: BLE001
+    requests = None  # type: ignore
+    class RequestException(Exception):  # fallback for typing
+        pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +29,8 @@ class PushManager:
         webhook_url_getter: Callable[[], Optional[str]],
         near_end_window_sec: float = 20.0,
         early_wake_offset_sec: float = 0.5,
+        emit_playback_state_events: bool = False,
+        playback_state_debounce_sec: float = 1.0,
     ):
         """Create push manager.
 
@@ -35,6 +45,9 @@ class PushManager:
         self._webhook_url_getter = webhook_url_getter
         self._near_end_window_sec = max(5.0, float(near_end_window_sec))
         self._early_wake_offset_sec = max(0.1, float(early_wake_offset_sec))
+        self._emit_playback_state_events = bool(emit_playback_state_events)
+        self._playback_state_debounce_sec = max(0.1, float(playback_state_debounce_sec))
+        self._last_state_event_ts: Optional[float] = None
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._listeners_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
@@ -94,9 +107,12 @@ class PushManager:
             start = time.time()
             remaining_to_end: Optional[float] = None
             try:
-                track_changed, remaining_to_end = self._poll_and_emit_with_remaining()
+                _, remaining_to_end = self._poll_and_emit_with_remaining()
                 self._consecutive_errors = 0
             except Exception as exc:  # noqa: BLE001
+                # We intentionally catch all here because network auth expiry, JSON shape
+                # changes, or transient library errors should not kill the daemon thread.
+                # Error count drives a simple backoff; detailed errors still logged.
                 self._consecutive_errors += 1
                 if self._consecutive_errors <= 3:
                     logger.warning("[PushManager] Poll error: %s", exc)
@@ -151,18 +167,47 @@ class PushManager:
         album_name = track.get("album") or track.get("album_name")
         track_name = track.get("name") or track.get("track_name")
 
-    # Determine changes (metadata only). We intentionally ignore pause/resume
-    # and progress changes so that the e-ink display is not refreshed unless
-    # a *new track* (or its core textual metadata) appears. This minimizes
-    # ghosting and unnecessary 20s refresh cycles on slow displays.
+        # Determine changes (metadata only) OR optionally playback state changes.
+        # Metadata changes drive image refresh. Playback state (pause/resume)
+        # optionally emits a lightweight event when enabled.
         changed_track_id = bool(track_id and track_id != self._last_track_id)
         changed_artist = artist_name != self._last_artist_name
         changed_album = album_name != self._last_album_name
         changed_title = track_name != self._last_track_name
         metadata_changed = changed_track_id or changed_artist or changed_album or changed_title
 
-        # Only emit when metadata changed, unless force=True
+        # Optionally emit playback_state_changed when only is_playing toggles
+        if (
+            self._emit_playback_state_events
+            and not metadata_changed
+            and self._last_is_playing is not None
+            and is_playing != self._last_is_playing
+        ):
+            now_ts = time.time()
+            if (
+                self._last_state_event_ts is None
+                or (now_ts - self._last_state_event_ts) >= self._playback_state_debounce_sec
+            ):
+                # Debounce ensures rapid play/pause toggles (user tapping controls) do not
+                # flood downstream consumers. We emit only after the configured quiet period.
+                event = {
+                    "channel_id": "com.spotify.status",
+                    "event_type": "playback_state_changed",
+                    "payload": {
+                        "track_id": self._last_track_id,
+                        "is_playing": is_playing,
+                    },
+                    "ts": now_ts,
+                    "version": 1,
+                }
+                self._last_state_event_ts = now_ts
+                self._dispatch(event)
+                # We continue to evaluate metadata_changed after, no return here.
+
+        # Only emit metadata event when metadata changed, unless forced
         if not force and not metadata_changed:
+            # Update last play state for future state-change detection
+            self._last_is_playing = is_playing  # type: ignore[assignment]
             return False
 
         event_type = "now_playing_changed"
@@ -208,9 +253,10 @@ class PushManager:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[PushManager] Listener raised: %s", exc)
         webhook_url = self._webhook_url_getter()
-        if webhook_url:
-            import requests  # local import to avoid always loading at module import
+        if webhook_url and requests is not None:
             try:
                 requests.post(webhook_url, json=event, timeout=5)
-            except Exception as exc:  # noqa: BLE001
+            except RequestException as exc:  # network / HTTP layer issues
                 logger.debug("[PushManager] Webhook POST failed: %s", exc)
+        elif webhook_url and requests is None:
+            logger.debug("[PushManager] Webhook URL configured but 'requests' not available")
