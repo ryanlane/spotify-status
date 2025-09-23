@@ -676,8 +676,12 @@ class SpotifyStatusChannel:
         if self._push_manager is None:
             self._push_manager = PushManager(
                 poll_interval=self.push_poll_interval,
-                # Force uncached retrieval so we see track boundary promptly
-                get_current_track=lambda: self.spotify_service.get_current_track(force=True) if getattr(self, 'spotify_service', None) else None,
+                # Force uncached retrieval so we see track boundary promptly.
+                # Convert TrackInfo objects to dict for PushManager which expects mapping-like.
+                get_current_track=lambda: (
+                    (lambda _t: _t.to_dict() if hasattr(_t, 'to_dict') else _t)
+                    (self.spotify_service.get_current_track(force=True))  # type: ignore[arg-type]
+                ) if getattr(self, 'spotify_service', None) else None,
                 webhook_url_getter=lambda: self.webhook_url,
                 near_end_window_sec=self.near_end_window_sec,
                 early_wake_offset_sec=self.early_wake_offset_sec,

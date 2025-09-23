@@ -151,6 +151,25 @@ class PushManager:
     # Poll & emit ---------------------------------------------------------
     def _poll_and_emit(self, force: bool = False) -> bool:
         track = self._get_current_track()
+        # Defensive: allow a TrackInfo-like object (dataclass / pydantic) to be returned.
+        if track is not None and not isinstance(track, dict):
+            # Attempt common conversion patterns
+            if hasattr(track, 'to_dict') and callable(getattr(track, 'to_dict')):  # dataclass or custom
+                try:  # noqa: BLE001
+                    track = track.to_dict()  # type: ignore
+                except Exception as conv_e:  # noqa: BLE001
+                    logger.error("[PushManager] Failed converting track object to dict: %s", conv_e)
+                    track = None
+            elif hasattr(track, 'model_dump'):
+                try:  # pydantic v2
+                    track = track.model_dump()  # type: ignore
+                except Exception:  # noqa: BLE001
+                    track = None
+            elif hasattr(track, 'dict'):
+                try:  # pydantic v1
+                    track = track.dict()  # type: ignore
+                except Exception:  # noqa: BLE001
+                    track = None
         if not track:
             # If we previously had a track id and now no playback, emit cleared event
             if self._last_track_id is not None:
