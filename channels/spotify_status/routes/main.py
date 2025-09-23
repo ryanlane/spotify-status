@@ -152,6 +152,16 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
                         channel._save_settings(channel.config)
                     channel.token_info = token_info  # type: ignore[attr-defined]
                     channel.spotify_client = __import__('spotipy').Spotify(auth_manager=auth_manager)  # type: ignore[attr-defined]
+                    # Immediately construct SpotifyService so first manifest/UI
+                    # refresh reflects playback status without requiring a
+                    # process restart or waiting for a lazy accessor.
+                    try:  # noqa: BLE001
+                        adaptive_cache_ttl = max(1, min(5, channel.push_poll_interval - 1))
+                        from service import SpotifyService  # type: ignore
+                        channel.spotify_service = SpotifyService(channel.spotify_client, cache_ttl=adaptive_cache_ttl)  # type: ignore[attr-defined]
+                    except Exception:
+                        # Non-fatal; lazy creation path in channel.get_current_track will recover.
+                        pass
                     return JSONResponse({
                         "success": True,
                         "message": "Spotify authorized",

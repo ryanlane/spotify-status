@@ -381,7 +381,21 @@ class SpotifyStatusChannel:
     
     def get_current_track(self) -> Optional[Dict[str, Any]]:
         """Return current track info via SpotifyService (dict form)."""
-        if not self.spotify_service:
+        # Lazy bind the SpotifyService if authorization completed after initial
+        # channel construction (first-run flow with no cached token). The
+        # OAuth callback previously only set `spotify_client`, leaving
+        # `spotify_service` None which caused manifest/UI to always report
+        # "No music playing" until a process restart. This guard self-heals
+        # that state the moment a caller asks for the current track.
+        if not getattr(self, "spotify_service", None) and getattr(self, "spotify_client", None):
+            try:  # noqa: BLE001
+                adaptive_cache_ttl = max(1, min(5, self.push_poll_interval - 1))
+                self.spotify_service = SpotifyService(self.spotify_client, cache_ttl=adaptive_cache_ttl)  # type: ignore[attr-defined]
+                logger.info("[SpotifyStatusChannel] Late-initialized SpotifyService after auth callback")
+            except Exception as svc_e:  # noqa: BLE001
+                logger.error("[SpotifyStatusChannel] Failed late-init SpotifyService: %s", svc_e)
+                self.spotify_service = None  # type: ignore[attr-defined]
+        if not getattr(self, "spotify_service", None):  # Still missing
             return None
         cfg = self.config.get("spotify", {})
         market = cfg.get("market") or None
