@@ -3,7 +3,7 @@
   "id": "com.spotify.status",
   "name": "Spotify Status Channel",
   "description": "Display currently playing Spotify track album art and metadata",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Ryan Lane",
   "settingsType": "advanced",
   "update_schedule": {

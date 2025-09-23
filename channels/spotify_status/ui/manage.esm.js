@@ -15,7 +15,12 @@ class SpotifyStatusManager extends HTMLElement {
       clientId: '',
       clientSecret: '',
       redirectUri: '',
-      saving: false
+      saving: false,
+      // new: last updated indicator
+      lastUpdated: null,
+      // optional diagnostics: content fingerprint and sha256
+      lastFingerprint: null,
+      lastSha256: null,
     };
 
     this.apiBaseUrl = this.getApiBaseUrl();
@@ -189,6 +194,7 @@ class SpotifyStatusManager extends HTMLElement {
         .loading {text-align:center;padding:40px;color:#6c757d;} 
         .error {background:#f8d7da;border:1px solid #f5c6cb;color:#721c24;padding:16px;border-radius:8px;margin-top:16px;} 
         .auth-warning {background:#fff3cd;border:1px solid #ffeeba;color:#856404;padding:12px;border-radius:8px;margin-bottom:16px;font-size:.85rem;} 
+        .footer { margin-top: 10px; text-align:center; color:#6c757d; font-size: .8rem; }
       </style>
       <div class="container">
         <div class="card">
@@ -207,6 +213,8 @@ class SpotifyStatusManager extends HTMLElement {
               <button class="btn" id="refresh-btn">🔄 Refresh</button>
               <button class="btn" id="generate-btn">🖼️ Generate Image</button>
             </div>
+            ${this.state.lastUpdated ? `<div class="footer">Last image generated: ${new Date(this.state.lastUpdated).toLocaleString()}</div>` : ''}
+            ${(this.state.lastFingerprint || this.state.lastSha256) ? `<div class="footer" style="font-size:.75rem;">${this.state.lastFingerprint ? `fp: ${this.state.lastFingerprint}` : ''}${(this.state.lastFingerprint && this.state.lastSha256) ? ' · ' : ''}${this.state.lastSha256 ? `sha: ${String(this.state.lastSha256).slice(0,8)}…` : ''}</div>` : ''}
             ${this.state.error ? `<div class="error">${this.state.error}</div>` : ''}
             ${!this.state.isConnected ? `<div class="error">Unable to connect to Spotify. Please check your settings and network connection.</div>` : ''}
             ${this.state.currentTrack ? '' : `<div class="error">No track is currently playing. Start a track in Spotify to see the status here.</div>`}
@@ -348,6 +356,12 @@ class SpotifyStatusManager extends HTMLElement {
       }
 
       if (data.success) {
+        // derive timestamp preference order: server -> image -> client now
+        const serverTs = data.timestamp || (data.image && data.image.timestamp) || data.generated_at || (data.image && data.image.generated_at);
+        const lastUpdated = serverTs ? new Date(serverTs).toISOString() : new Date().toISOString();
+        const lastFingerprint = data.content_fingerprint || (data.image && data.image.content_fingerprint) || null;
+        const lastSha256 = data.sha256 || (data.image && data.image.sha256) || null;
+        this.setState({ lastUpdated, lastFingerprint, lastSha256 });
         const mime = data.format === 'png' ? 'image/png' : 'image/jpeg';
         const imageWindow = window.open('', '_blank');
         imageWindow.document.write(`
