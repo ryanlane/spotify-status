@@ -65,10 +65,28 @@ class SpotifyService:
     def authorized(self) -> bool:
         return self._client is not None
 
-    def get_current_track(self, *, market: Optional[str] = None, additional_types: Optional[str] = None):  # -> Optional[TrackInfo]
-        """Return cached or fresh TrackInfo (annotation omitted for dynamic import safety)."""
-        # Cache check
-        if self._cache and self._cache_ts and (time.time() - self._cache_ts) < self._cache_ttl:
+    def get_current_track(
+        self,
+        *,
+        market: Optional[str] = None,
+        additional_types: Optional[str] = None,
+        force: bool = False,
+    ):  # -> Optional[TrackInfo]
+        """Return cached or fresh TrackInfo.
+
+        Parameters
+        ----------
+        market: Optional[str]
+            Market code passed through to Spotify.
+        additional_types: Optional[str]
+            Additional item types (e.g. "episode") for playback query.
+        force: bool
+            When True, bypass the in-memory cache (used by push polling logic
+            so rapid short-interval polls still observe track boundaries
+            promptly). Default False for regular API usage.
+        """
+        # Cache check – skip when force requested
+        if not force and self._cache and self._cache_ts and (time.time() - self._cache_ts) < self._cache_ttl:
             return self._cache
         if not self._client:
             return None

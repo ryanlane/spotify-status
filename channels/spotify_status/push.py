@@ -8,7 +8,7 @@ from __future__ import annotations
 import threading
 import time
 import logging
-from typing import Callable, Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +18,23 @@ class PushManager:
         self,
         poll_interval: int,
         get_current_track: Callable[[], Optional[Dict[str, Any]]],
-        webhook_url_getter: Callable[[], Optional[str]]
+        webhook_url_getter: Callable[[], Optional[str]],
+        near_end_window_sec: float = 20.0,
+        early_wake_offset_sec: float = 0.5,
     ):
+        """Create push manager.
+
+        poll_interval: base seconds between polls (floor enforced at 3 here; channel enforces 2 overall).
+        near_end_window_sec: when remaining playback time <= this window we switch to
+            an adaptive wake targeted at (remaining - early_wake_offset_sec).
+        early_wake_offset_sec: seconds after the theoretical track end to wake; avoids
+            querying *before* Spotify advances to the next item.
+        """
         self.poll_interval = max(3, int(poll_interval))
         self._get_current_track = get_current_track
         self._webhook_url_getter = webhook_url_getter
+        self._near_end_window_sec = max(5.0, float(near_end_window_sec))
+        self._early_wake_offset_sec = max(0.1, float(early_wake_offset_sec))
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._listeners_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
@@ -70,9 +82,19 @@ class PushManager:
 
     # Core loop -----------------------------------------------------------
     def _loop(self):
+        """Main polling loop with adaptive near-track-end logic.
+
+        Goals:
+        - Poll baseline every self.poll_interval seconds (>=2s) to detect new tracks.
+        - If we are within ~20s of track end, schedule a wake close to (end - 0.5s)
+          so the next track is picked up quickly (important for slow e-ink refresh cycle).
+        - Apply simple error backoff without exploding the wake timing logic.
+        """
         while not self._stop.is_set():
+            start = time.time()
+            remaining_to_end: Optional[float] = None
             try:
-                self._poll_and_emit()
+                track_changed, remaining_to_end = self._poll_and_emit_with_remaining()
                 self._consecutive_errors = 0
             except Exception as exc:  # noqa: BLE001
                 self._consecutive_errors += 1
@@ -80,13 +102,47 @@ class PushManager:
                     logger.warning("[PushManager] Poll error: %s", exc)
                 else:
                     logger.error("[PushManager] Repeated poll errors (%d): %s", self._consecutive_errors, exc)
+            # Base sleep including minimal error backoff
             backoff = min(self._consecutive_errors * 2, 30)
-            time.sleep(self.poll_interval + backoff)
+            sleep_for = self.poll_interval + backoff
+            # Adaptive: if we have remaining time <=20s, attempt to wake near boundary
+            if (
+                remaining_to_end is not None
+                and remaining_to_end <= self._near_end_window_sec
+            ):
+                # Wake shortly *after* expected boundary to let backend advance.
+                target = max(
+                    self._early_wake_offset_sec,
+                    remaining_to_end - self._early_wake_offset_sec,
+                )
+                # But never sleep longer than base poll interval (so we still capture any manual skips)
+                sleep_for = min(sleep_for, target)
+            elapsed = time.time() - start
+            # Avoid negative (can happen if heavy work) – ensure minimum 0.25s spacing
+            sleep_for = max(0.25, sleep_for - elapsed)
+            if self._stop.wait(timeout=sleep_for):  # Allows fast shutdown
+                break
 
     # Poll & emit ---------------------------------------------------------
     def _poll_and_emit(self, force: bool = False) -> bool:
         track = self._get_current_track()
         if not track:
+            # If we previously had a track id and now no playback, emit cleared event
+            if self._last_track_id is not None:
+                event = {
+                    "channel_id": "com.spotify.status",
+                    "event_type": "now_playing_cleared",
+                    "payload": None,
+                    "ts": time.time(),
+                    "version": 1,
+                }
+                # Reset last-known metadata so next actual track emits normally
+                self._last_track_id = None
+                self._last_artist_name = None
+                self._last_album_name = None
+                self._last_track_name = None
+                self._dispatch(event)
+                return True
             return False
         track_id = track.get("track_id")
         is_playing = track.get("is_playing")
@@ -95,7 +151,10 @@ class PushManager:
         album_name = track.get("album") or track.get("album_name")
         track_name = track.get("name") or track.get("track_name")
 
-        # Determine changes (metadata only, per new requirement)
+    # Determine changes (metadata only). We intentionally ignore pause/resume
+    # and progress changes so that the e-ink display is not refreshed unless
+    # a *new track* (or its core textual metadata) appears. This minimizes
+    # ghosting and unnecessary 20s refresh cycles on slow displays.
         changed_track_id = bool(track_id and track_id != self._last_track_id)
         changed_artist = artist_name != self._last_artist_name
         changed_album = album_name != self._last_album_name
@@ -124,6 +183,20 @@ class PushManager:
 
     def force_emit(self) -> bool:
         return self._poll_and_emit(force=True)
+
+    def _poll_and_emit_with_remaining(self) -> Tuple[bool, Optional[float]]:
+        """Wrapper returning (changed, remaining_seconds_to_track_end).
+
+        Only calculates remaining time if a track is playing and duration/progress present.
+        """
+        track = self._get_current_track()
+        if not track:
+            return False, None
+        duration = track.get("duration_ms") or 0
+        progress = track.get("progress_ms") or 0
+        remaining_ms = max(0, duration - progress)
+        changed = self._poll_and_emit()
+        return changed, (remaining_ms / 1000.0 if duration and remaining_ms else None)
 
     # Dispatch ------------------------------------------------------------
     def _dispatch(self, event: Dict[str, Any]):

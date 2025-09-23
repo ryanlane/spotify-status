@@ -229,13 +229,26 @@ class SpotifyStatusChannel:
         # emits events when something meaningful changes.
         self.supports_push = True  # Capability flag exposed in manifest
         self.push_poll_interval = (
-            int(self.config.get("spotify", {}).get("push_poll_interval", 10))
-            if isinstance(self.config.get("spotify", {}).get("push_poll_interval", 10), (int, float))
-            else 10
-        )  # seconds between background checks
-        if self.push_poll_interval < 3:
-            # Hard floor to avoid API spam / rate-limit risk
-            self.push_poll_interval = 3
+            int(self.config.get("spotify", {}).get("push_poll_interval", 5))
+            if isinstance(self.config.get("spotify", {}).get("push_poll_interval", 5), (int, float))
+            else 5
+        )  # seconds between background checks (target 2–3s acceptable)
+        if self.push_poll_interval < 2:
+            # New hard floor 2s – below that risk of 429s / wasted quota
+            self.push_poll_interval = 2
+
+    # Near-end adaptive wake tuning controls:
+    # near_end_window_sec: when remaining playback time <= this window we schedule
+    #   finer-grained wakeups to catch track transitions quickly (benefits slow e-ink).
+    # early_wake_offset_sec: how long *after* the predicted end we re-poll (gives
+    #   Spotify a moment to advance internally, avoiding false 'same track').
+        se_spotify_cfg = self.config.get("spotify", {})
+        self.near_end_window_sec = float(se_spotify_cfg.get("near_end_window_sec", 20.0))
+        if self.near_end_window_sec < 5:
+            self.near_end_window_sec = 5.0  # safety floor
+        self.early_wake_offset_sec = float(se_spotify_cfg.get("early_wake_offset_sec", 0.5))
+        if self.early_wake_offset_sec < 0.1:
+            self.early_wake_offset_sec = 0.1
 
         # Optional outbound webhook (POST) – configured via settings.json ("webhook_url")
         self.webhook_url: Optional[str] = self.config.get("spotify", {}).get("webhook_url")
@@ -337,7 +350,9 @@ class SpotifyStatusChannel:
                     # Reuse already imported SpotifyService (avoid relative import that
                     # fails when module lacks package context during dynamic loading).
                     try:
-                        self.spotify_service = SpotifyService(self.spotify_client, cache_ttl=self.cache_duration)
+                        # Adaptive short cache for push: ensure we never cache longer than poll interval - 1
+                        adaptive_cache_ttl = max(1, min(5, self.push_poll_interval - 1))
+                        self.spotify_service = SpotifyService(self.spotify_client, cache_ttl=adaptive_cache_ttl)
                     except Exception as svc_e:  # noqa: BLE001
                         logger.error("[SpotifyStatusChannel] Failed initializing SpotifyService: %s", svc_e)
                         self.spotify_service = None
@@ -423,7 +438,7 @@ class SpotifyStatusChannel:
                     "preferred_mode": "push",
                     "push_supported": True,
                     # Only metadata (track/artist/album) changes trigger events now.
-                    "push_event_types": ["now_playing_changed"],
+                    "push_event_types": ["now_playing_changed", "now_playing_cleared"],
                     "push_poll_interval": self.push_poll_interval
                 },
                 "configuration": {
@@ -462,7 +477,9 @@ class SpotifyStatusChannel:
                 "push": {
                     "active": bool(self._push_manager and self._push_manager.thread_alive()),
                     "listener_count": self._push_manager.listener_count() if self._push_manager else 0,
-                    "webhook_configured": bool(self.webhook_url)
+                    "webhook_configured": bool(self.webhook_url),
+                    "near_end_window_sec": self.near_end_window_sec,
+                    "early_wake_offset_sec": self.early_wake_offset_sec,
                 }
             }
             
@@ -613,7 +630,8 @@ class SpotifyStatusChannel:
         if self._push_manager is None:
             self._push_manager = PushManager(
                 poll_interval=self.push_poll_interval,
-                get_current_track=lambda: self.get_current_track(),
+                # Force uncached retrieval so we see track boundary promptly
+                get_current_track=lambda: self.spotify_service.get_current_track(force=True) if getattr(self, 'spotify_service', None) else None,
                 webhook_url_getter=lambda: self.webhook_url,
             )
 
