@@ -31,33 +31,63 @@ if str(_PLUGIN_DIR) not in sys.path:
     sys.path.append(str(_PLUGIN_DIR))
 
 def _import_local(module_name: str, file_name: Optional[str] = None) -> ModuleType:
-    """Import a sibling module by explicit path with diagnostic logging.
+    """Import a sibling module or package by explicit path with diagnostic logging.
 
-    Adds granular start/end logging so we can pinpoint failures happening during
-    module execution (e.g., class decorators, dataclass processing, or import
-    side-effects) that previously surfaced only as a generic plugin load error.
+    Supports both single-file modules (``name.py``) and packages (``name/__init__.py``)
+    so we can transition modules into a structured package directory without
+    changing the dynamic import call sites.
     """
-    target = _PLUGIN_DIR / (file_name or f"{module_name}.py")
-    logger.debug("[SpotifyStatusChannel] BEGIN import module=%s path=%s", module_name, target)
+    # Resolve target path: explicit file_name overrides (used rarely), else prefer
+    # package directory if it exists, falling back to a .py module file.
+    pkg_dir = _PLUGIN_DIR / module_name
+    is_package = False
+    if file_name:
+        target = _PLUGIN_DIR / file_name
+    elif pkg_dir.is_dir() and (pkg_dir / "__init__.py").exists():
+        target = pkg_dir / "__init__.py"
+        is_package = True
+    else:
+        target = _PLUGIN_DIR / f"{module_name}.py"
+
+    logger.debug(
+        "[SpotifyStatusChannel] BEGIN import module=%s target=%s package=%s", module_name, target, is_package
+    )
     if not target.exists():
-        logger.error("[SpotifyStatusChannel] Missing module file module=%s path=%s", module_name, target)
+        logger.error(
+            "[SpotifyStatusChannel] Missing module file module=%s path=%s", module_name, target
+        )
         raise ImportError(f"Local module file not found: {target}")
+
     unique_name = f"spotify_status_{module_name}"
-    spec = importlib.util.spec_from_file_location(unique_name, target)
+    # Build spec; for packages we need to set submodule search locations so that
+    # any future relative imports inside the package continue to work.
+    spec = importlib.util.spec_from_file_location(
+        unique_name,
+        target,
+        submodule_search_locations=[str(pkg_dir)] if is_package else None,  # type: ignore[arg-type]
+    )
     if spec is None or spec.loader is None:
-        logger.error("[SpotifyStatusChannel] Failed creating spec module=%s path=%s", module_name, target)
+        logger.error(
+            "[SpotifyStatusChannel] Failed creating spec module=%s path=%s", module_name, target
+        )
         raise ImportError(f"Cannot load spec for {target}")
     module = importlib.util.module_from_spec(spec)
-    # Ensure module is visible in sys.modules BEFORE execution so decorators (e.g., @dataclass)
-    # that inspect sys.modules[cls.__module__] during class creation can resolve the module.
-    sys.modules[unique_name] = module
+    sys.modules[unique_name] = module  # Pre-register for decorators/dataclasses
     try:
         spec.loader.exec_module(module)  # type: ignore[assignment]
     except Exception as e:  # noqa: BLE001
         tb = traceback.format_exc()
-        logger.error("[SpotifyStatusChannel] Exception executing module=%s path=%s error=%s\n%s", module_name, target, e, tb)
+        logger.error(
+            "[SpotifyStatusChannel] Exception executing module=%s path=%s error=%s\n%s",
+            module_name,
+            target,
+            e,
+            tb,
+        )
         raise ImportError(f"Failed executing {target}: {e}") from e
-    logger.debug("[SpotifyStatusChannel] END import module=%s path=%s", module_name, target)
+    logger.debug(
+        "[SpotifyStatusChannel] END import module=%s path=%s package=%s", module_name, target, is_package
+    )
     return module
 
 # Load local modules explicitly (no relative import usage)
@@ -85,10 +115,12 @@ except Exception as e:  # noqa: BLE001
     raise
 
 try:
-    models_mod = _import_local("models", file_name="models.py") if (_PLUGIN_DIR / "models.py").exists() else _import_local("models")
+    # Always import models package (supports new directory layout). The legacy
+    # top-level models.py file has been removed after migration.
+    models_mod = _import_local("models")
     TrackInfo = getattr(models_mod, "TrackInfo")
 except Exception as e:  # noqa: BLE001
-    logger.error("[SpotifyStatusChannel] Failed loading models module: %s", e)
+    logger.error("[SpotifyStatusChannel] Failed loading models package: %s", e)
     raise
 
 try:

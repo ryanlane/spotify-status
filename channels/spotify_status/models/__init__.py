@@ -6,6 +6,17 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 
+# Re-export TrackInfo dataclass from dedicated module
+from .track_info import TrackInfo  # noqa: F401
+
+__all__ = [
+    "TrackInfo",
+    "SpotifyTrack",
+    "ImageRequest",
+    "SpotifyConfig",
+    "ChannelStatus",
+]
+
 
 class SpotifyTrack(BaseModel):
     """Model for Spotify track information"""

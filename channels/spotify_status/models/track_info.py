@@ -1,7 +1,7 @@
-"""Data models for the Spotify Status channel.
+"""Lightweight dataclass model for currently playing track.
 
-We keep models lightweight (dataclasses) to avoid a hard pydantic dependency
-inside the plugin. The host API can still wrap/validate with pydantic if needed.
+Separated from root models module to avoid dual model sources and make dynamic
+imports simpler/safer when the plugin is loaded under a synthetic module name.
 """
 from __future__ import annotations
 
@@ -22,14 +22,14 @@ class TrackInfo:
     device: str
 
     @property
-    def paused(self) -> bool:
+    def paused(self) -> bool:  # Derived convenience flag
         return not self.is_playing
 
     @property
     def progress_pct(self) -> float:
         return (self.progress_ms / self.duration_ms * 100) if self.duration_ms else 0.0
 
-    def to_dict(self) -> Dict[str, Any]:  # Friendly for JSON responses
+    def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["paused"] = self.paused
         data["progress_pct"] = self.progress_pct
