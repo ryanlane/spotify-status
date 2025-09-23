@@ -239,6 +239,8 @@ class SpotifyStatusChannel:
         # Renderers
         self._renderer = PillowRenderer()
         self._svg_renderer = SvgRenderer(self.channel_dir / "svg")
+        # Track last emitted fingerprint for scheduler-friendly distribution hints
+        self._last_track_fingerprint = None
 
         # --- Push / Event streaming support (poll + dispatch) ---
         # We present a very light-weight push abstraction so the host API service
@@ -584,6 +586,18 @@ class SpotifyStatusChannel:
 
             steps.append("get_current_track")
             track_info = self.get_current_track()
+            # Compute a stable fingerprint of content-driving fields
+            def _fp(t: Optional[Dict[str, Any]]) -> str:
+                if not t:
+                    return "none"
+                return "|".join([
+                    str(t.get("track_id") or ""),
+                    str(t.get("artist") or t.get("artist_name") or ""),
+                    str(t.get("album") or t.get("album_name") or ""),
+                    str(t.get("name") or t.get("track_name") or ""),
+                ])
+            current_fp = _fp(track_info)
+            distribution_mode = "new" if (self._last_track_fingerprint is None or current_fp != self._last_track_fingerprint) else "existing"
 
             image = None
             if render_mode == "svg" and self._svg_renderer.available:
@@ -639,14 +653,31 @@ class SpotifyStatusChannel:
                 "track_info": track_info,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "steps": steps,
+                # Back-compat (some consumers may still read top-level fields)
                 "bytes": raw_bytes,
                 "content_type": content_type,
                 "preferred_transport": "bytes",
+                # New nested image object for scheduler/scene refresh service
+                "image": {
+                    "bytes": raw_bytes,
+                    "content_type": content_type,
+                    "format": out_format,
+                    "width": width,
+                    "height": height,
+                    "description": description,
+                    "track_info": track_info,
+                    "distribution_mode": distribution_mode,
+                    "preferred_transport": "bytes",
+                },
                 "grayscale": grayscale_flag,
                 "render_mode": ("svg" if render_mode == "svg" and self._svg_renderer.available else "pillow"),
             }
             if image_base64 is not None:
-                result["image"] = image_base64
+                # maintain legacy pathway (string) while keeping dict for new pipeline
+                result["image_base64"] = image_base64
+                result["image"]["base64"] = image_base64
+            # Update fingerprint at end so next call can detect unchanged content
+            self._last_track_fingerprint = current_fp
             return result
         except Exception as e:  # noqa: BLE001
             logger.exception("[SpotifyStatusChannel] Failed to generate image at step %s: %s", steps[-1] if steps else 'start', e)
