@@ -10,8 +10,6 @@ import hashlib
 import io
 import json
 import logging
-import requests
-import asyncio
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -20,7 +18,6 @@ import sys
 import importlib.util
 import traceback
 from types import ModuleType
-from PIL import Image  # type: ignore
 
 # Configure logging early so utility import function can emit diagnostics.
 logging.basicConfig(level=logging.INFO)
@@ -92,14 +89,25 @@ def _import_local(module_name: str, file_name: Optional[str] = None) -> ModuleTy
     )
     return module
 
-# Load local modules explicitly (no relative import usage)
+# Load local modules explicitly (no relative import usage). Renderer is optional for manifest to load.
 try:
     renderer_mod = _import_local("renderer")
     PillowRenderer = getattr(renderer_mod, "PillowRenderer")
     RenderOptions = getattr(renderer_mod, "RenderOptions")
 except Exception as e:  # noqa: BLE001
-    logger.error("[SpotifyStatusChannel] Failed loading renderer module: %s", e)
-    raise
+    logger.warning("[SpotifyStatusChannel] Pillow renderer unavailable (%s) – continuing; image requests will fail", e)
+    class RenderOptions:  # type: ignore
+        width: int = 800
+        height: int = 480
+        grayscale: bool = False
+    class PillowRenderer:  # type: ignore
+        available = False
+        def __init__(self, *_, **__):
+            pass
+        def create_status_image(self, *_a, **_k):
+            raise RuntimeError("Pillow renderer unavailable")
+        def create_no_music_image(self, *_a, **_k):
+            raise RuntimeError("Pillow renderer unavailable")
 
 try:
     svg_renderer_mod = _import_local("svg_renderer")
@@ -158,7 +166,12 @@ try:  # Optional dependency guard so router still mounts even if spotipy missing
     _SPOTIPY_AVAILABLE = True
 except ImportError:  # noqa: BLE001
     logger.warning("[SpotifyStatusChannel] 'spotipy' not installed – channel running in degraded mode (no Spotify API calls)")
-from fastapi import APIRouter
+try:
+    from fastapi import APIRouter
+except Exception:  # noqa: BLE001
+    class APIRouter:  # type: ignore
+        def __init__(self, *_, **__):
+            raise ImportError("fastapi is required for router construction")
 
 # Attempt optional imports for HTML rendering pathway
 _JINJA2_AVAILABLE = False  # HTML rendering pathway removed
@@ -236,6 +249,8 @@ class SpotifyStatusChannel:
         self.spotify_client = None
         # Holds OAuth token metadata (expires_at, access_token, refresh_token, etc.) once authorized
         self.token_info = None  # type: Optional[Dict[str, Any]]
+        # Service wrapper (initialized on auth or lazily when needed)
+        self.spotify_service = None
         self.last_track_cache = None
         self.cache_timestamp = None
         self.cache_duration = 30  # seconds
@@ -277,6 +292,16 @@ class SpotifyStatusChannel:
         self.early_wake_offset_sec = float(se_spotify_cfg.get("early_wake_offset_sec", 0.5))
         if self.early_wake_offset_sec < 0.1:
             self.early_wake_offset_sec = 0.1
+
+        # Optional push emission gating: only emit at track start
+        self.emit_only_at_track_start = bool(se_spotify_cfg.get("emit_only_at_track_start", False))
+        self.start_threshold_pct = float(se_spotify_cfg.get("start_threshold_pct", 3.0))
+        self.start_threshold_sec = float(se_spotify_cfg.get("start_threshold_sec", 0.0))
+
+        # Progress reset detection options
+        self.emit_on_progress_reset = bool(se_spotify_cfg.get("emit_on_progress_reset", True))
+        self.progress_reset_threshold_sec = float(se_spotify_cfg.get("progress_reset_threshold_sec", 1.5))
+        self.progress_reset_floor_pct = float(se_spotify_cfg.get("progress_reset_floor_pct", 5.0))
 
         # Optional playback state (pause/resume) events
         self.emit_playback_state_events = bool(se_spotify_cfg.get("emit_playback_state_events", False))
@@ -329,14 +354,6 @@ class SpotifyStatusChannel:
                 logger.debug("[SpotifyStatusChannel] Loaded last_fingerprint from state: %s", self._last_track_fingerprint)
         except Exception as st_e:  # noqa: BLE001
             logger.debug("[SpotifyStatusChannel] No prior state loaded: %s", st_e)
-            # Optional push emission gating: only emit at track start
-            self.emit_only_at_track_start = bool(se_spotify_cfg.get("emit_only_at_track_start", False))
-            self.start_threshold_pct = float(se_spotify_cfg.get("start_threshold_pct", 3.0))
-            self.start_threshold_sec = float(se_spotify_cfg.get("start_threshold_sec", 0.0))
-        # Progress reset detection options
-        self.emit_on_progress_reset = bool(se_spotify_cfg.get("emit_on_progress_reset", True))
-        self.progress_reset_threshold_sec = float(se_spotify_cfg.get("progress_reset_threshold_sec", 1.5))
-        self.progress_reset_floor_pct = float(se_spotify_cfg.get("progress_reset_floor_pct", 5.0))
 
     # ------------------------------------------------------------------
     # Settings Persistence
