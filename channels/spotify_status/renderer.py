@@ -30,7 +30,8 @@ class RenderOptions:
     height: int = 480
     grayscale: bool = False
     # Multiplier applied to base font sizes (1.0 = current sizing)
-    text_scale: float = 1.0
+    # Default bumped to make text more legible on landscape displays
+    text_scale: float = 1.4
     # Layout mode: "landscape" (art left, text right), "portrait" (art top, text bottom),
     # "square" (two-column like landscape), or "auto" to infer from aspect ratio.
     layout: str = "auto"
@@ -38,6 +39,11 @@ class RenderOptions:
     wrap: bool = False
     # Maximum lines per text block when wrap=True (applies to artist/album/track separately)
     max_lines: int = 2
+    # Right text column sizing in landscape mode. The column width is computed as
+    # max(width * right_col_ratio, right_col_min). We will also shrink the column down
+    # to the minimum if needed to allow album art to reach full height if width permits.
+    right_col_ratio: float = 0.34
+    right_col_min: int = 220
 
 
 class PillowRenderer:
@@ -137,9 +143,18 @@ class PillowRenderer:
                 self._center_in_rect(draw, "Album art here", font_placeholder, placeholder_bbox, fill="#111111")
             return image
         elif layout == "landscape":
-            right_col_min = 300
-            right_col_width = max(int(width * 0.36), right_col_min)
+            # Prefer a reasonably wide text column but allow shrinking to let
+            # album art fill the full available height when the aspect allows it.
+            right_col_min = max(120, int(options.right_col_min))
+            right_col_ratio = min(0.6, max(0.2, float(options.right_col_ratio)))
+            right_col_width = max(int(width * right_col_ratio), right_col_min)
             right_col_right = width - margin
+            # If possible, reduce right column so left area is wide enough to
+            # host square album art that fills the vertical space.
+            required_left_for_full_height = max(0, height - 2 * margin)
+            min_right_col_width_to_fit = width - (2 * margin + gutter + required_left_for_full_height)
+            if min_right_col_width_to_fit >= right_col_min and min_right_col_width_to_fit < right_col_width:
+                right_col_width = min_right_col_width_to_fit
             right_col_left = right_col_right - right_col_width
             left_area_left = margin
             left_area_right = right_col_left - gutter
@@ -163,10 +178,11 @@ class PillowRenderer:
         album_text = str(track_info.get("album", "Unknown Album"))
         track_text = str(track_info.get("name", "Unknown Track"))
 
-        # Fonts (scale with height and text_scale)
-        base_artist = max(22, int(height * 0.12))
-        base_album = max(16, int(height * 0.06))
-        base_track = max(18, int(height * 0.08))
+        # Fonts (scale with height and text_scale). Base percentages chosen for
+        # strong readability on 480px-tall landscape displays; adjust with text_scale.
+        base_artist = max(22, int(height * 0.14))
+        base_album = max(16, int(height * 0.08))
+        base_track = max(18, int(height * 0.10))
         sf = max(0.5, min(2.5, float(options.text_scale or 1.0)))
         artist_font = self._get_font(int(base_artist * sf))
         album_font = self._get_font(int(base_album * sf))
@@ -177,7 +193,7 @@ class PillowRenderer:
         line_gap = max(6, int(height * 0.015 * min(1.5, sf)))
 
         # Draw text within text_region
-        tr_l, tr_t, tr_r, tr_b = text_region
+        tr_l, _tr_t, tr_r, tr_b = text_region
         max_text_width = max(0, tr_r - tr_l)
 
         # Build line sets (either wrapped or fitted single-line)
@@ -236,7 +252,7 @@ class PillowRenderer:
         return image
 
     def create_no_music_image(self, options: RenderOptions) -> Image.Image:
-        """Render the same layout without a track – shows placeholders.
+        """Render the layout without a track – shows placeholders.
 
         Honors the same layout/text_scale/wrap options as create_status_image.
         """
@@ -260,12 +276,22 @@ class PillowRenderer:
 
         # Album art placeholder + text region
         if layout == "square":
-            # Already returned above; this branch won't execute. Kept for clarity.
-            pass
+            # Full-screen placeholder art; no text region in square mode
+            placeholder_bbox = [0, 0, width, height]
+            draw.rectangle(placeholder_bbox, fill="#CFCFCF")
+            font_placeholder = self._get_font(max(14, int(height * 0.06)))
+            self._center_in_rect(draw, "Album art here", font_placeholder, placeholder_bbox, fill="#111111")
+            return image
         elif layout == "landscape":
-            right_col_min = 300
-            right_col_width = max(int(width * 0.36), right_col_min)
+            right_col_min = max(120, int(getattr(options, "right_col_min", 220)))
+            right_col_ratio = min(0.6, max(0.2, float(getattr(options, "right_col_ratio", 0.34))))
+            right_col_width = max(int(width * right_col_ratio), right_col_min)
             right_col_right = width - margin
+            # Allow shrinking the right column to let album art reach full height
+            required_left_for_full_height = max(0, height - 2 * margin)
+            min_right_col_width_to_fit = width - (2 * margin + gutter + required_left_for_full_height)
+            if min_right_col_width_to_fit >= right_col_min and min_right_col_width_to_fit < right_col_width:
+                right_col_width = min_right_col_width_to_fit
             right_col_left = right_col_right - right_col_width
             left_area_left = margin
             left_area_right = right_col_left - gutter
@@ -289,9 +315,9 @@ class PillowRenderer:
             text_align = "left"
 
         # Fonts
-        base_artist = max(22, int(height * 0.12))
-        base_album = max(16, int(height * 0.06))
-        base_track = max(18, int(height * 0.08))
+        base_artist = max(22, int(height * 0.14))
+        base_album = max(16, int(height * 0.08))
+        base_track = max(18, int(height * 0.10))
         sf = max(0.5, min(2.5, float(options.text_scale or 1.0)))
         artist_font = self._get_font(int(base_artist * sf))
         album_font = self._get_font(int(base_album * sf))
@@ -300,7 +326,7 @@ class PillowRenderer:
         col_white = "#FFFFFF"
         col_gray = "#B0B0B0"
         line_gap = max(6, int(height * 0.015 * min(1.5, sf)))
-        tr_l, tr_t, tr_r, tr_b = text_region
+        tr_l, _tr_t, tr_r, tr_b = text_region
         max_text_width = max(0, tr_r - tr_l)
 
         # Placeholder text
@@ -308,9 +334,7 @@ class PillowRenderer:
         album_text = "Album Name"
         track_text = "Track Name"
 
-        if layout == "square":
-            # Should not reach here; text suppressed in square mode.
-            return image
+        # square layout already returned above
         if options.wrap:
             artist_lines = self._wrap_text(draw, artist_text, artist_font, max_text_width, options.max_lines)
             album_lines = self._wrap_text(draw, album_text, album_font, max_text_width, options.max_lines)
@@ -359,14 +383,13 @@ class PillowRenderer:
 
     # ---- Helpers ----
     def _load_fonts(self):
-        try:
-            font_large = ImageFont.truetype("arial.ttf", 24)
-            font_medium = ImageFont.truetype("arial.ttf", 18)
-            font_small = ImageFont.truetype("arial.ttf", 14)
-        except OSError:
-            font_large = ImageFont.load_default()
-            font_medium = ImageFont.load_default()
-            font_small = ImageFont.load_default()
+        """Legacy helper; retained for compatibility with callers/tests.
+
+        Prefer _get_font which scales correctly and uses DejaVuSans if available.
+        """
+        font_large = self._get_font(24)
+        font_medium = self._get_font(18)
+        font_small = self._get_font(14)
         return font_large, font_medium, font_small
 
     def _center_text(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, width: int, y: int, *, middle: bool=False, fill: str="black"):
@@ -379,10 +402,25 @@ class PillowRenderer:
 
     # -- New helpers for the right-column layout --
     def _get_font(self, size: int) -> ImageFont.ImageFont:
-        try:
-            return ImageFont.truetype("arial.ttf", size)
-        except OSError:
-            return ImageFont.load_default()
+        """Return a scalable TrueType font of the requested size.
+
+        On many Linux systems, "arial.ttf" isn't available; Pillow ships with
+        DejaVu fonts which are reliable for scaling. We try a short list before
+        falling back to the bitmap default.
+        """
+        candidates = [
+            "DejaVuSans.ttf",  # bundled with Pillow
+            "arial.ttf",
+            "LiberationSans-Regular.ttf",
+            "NotoSans-Regular.ttf",
+        ]
+        for name in candidates:
+            try:
+                return ImageFont.truetype(name, size)
+            except OSError:
+                continue
+        # Last resort (bitmap, non-scalable)
+        return ImageFont.load_default()
 
     def _text_bbox(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> Tuple[int, int, int, int]:
         # textbbox returns (left, top, right, bottom) on modern Pillow
@@ -489,7 +527,7 @@ class PillowRenderer:
         font: ImageFont.ImageFont,
         left_x: int,
         y: int,
-        max_width: int,
+        _max_width: int,
         line_gap: int,
         *,
         fill: str = "#FFFFFF",
