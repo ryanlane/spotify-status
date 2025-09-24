@@ -103,6 +103,39 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"Failed to get current track: {e}")
 
+    @router.get("/playback")
+    async def playback():  # noqa: D401
+        """Return full Spotify playback payload plus simplified track data.
+
+        This calls spotipy.current_playback directly (no internal cache) so
+        refreshing reflects live playback status changes.
+        """
+        if channel.degraded:
+            raise HTTPException(status_code=500, detail="Spotipy dependency missing; cannot query playback")
+        if not channel.spotify_client:
+            raise HTTPException(status_code=401, detail="Spotify not authorized")
+        try:
+            from datetime import datetime, timezone
+            cfg = channel.config.get("spotify", {})
+            playback = channel.spotify_client.current_playback(
+                market=cfg.get("market"),
+                additional_types=cfg.get("additional_types"),
+            )
+            # Best-effort simplified track alongside full payload
+            try:
+                track_info = channel.get_current_track()
+            except Exception:
+                track_info = None
+            return JSONResponse({
+                "success": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "authorized": True,
+                "playback": playback,
+                "track": track_info,
+            })
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Failed to get playback: {e}")
+
     async def _handle_auth_callback(request: Request):
         if channel.degraded:
             raise HTTPException(status_code=500, detail="Spotipy dependency missing; cannot authorize")
