@@ -618,6 +618,11 @@ class SpotifyStatusChannel:
             height = int(options.get("height", 480) or 480)
             grayscale_flag = bool(options.get("grayscale", False))
             render_mode = str(options.get("render_mode", "pillow")).lower()
+            # Rendering behavior options
+            text_scale_opt = float(options.get("text_scale", 1.0) or 1.0)
+            layout_opt = str(options.get("layout", "auto") or "auto")
+            wrap_opt = bool(options.get("wrap", False))
+            max_lines_opt = int(options.get("max_lines", 2) or 2)
 
             include_base64_flag = bool((request_data or {}).get("include_base64", False))
             suppress_legacy = bool((request_data or {}).get("suppress_legacy_base64", not include_base64_flag))
@@ -656,17 +661,42 @@ class SpotifyStatusChannel:
             if image is None:
                 if track_info:
                     steps.append("create_status_image")
-                    image = self._renderer.create_status_image(track_info, RenderOptions(width=width, height=height, grayscale=grayscale_flag))
+                    image = self._renderer.create_status_image(
+                        track_info,
+                        RenderOptions(
+                            width=width,
+                            height=height,
+                            grayscale=grayscale_flag,
+                            text_scale=text_scale_opt,
+                            layout=layout_opt,
+                            wrap=wrap_opt,
+                            max_lines=max_lines_opt,
+                        ),
+                    )
                     track_name = track_info.get('name', 'Unknown Track')
                     artist = track_info.get('artist', 'Unknown Artist')
                     description = f"Now playing: {track_name} by {artist}"
                 else:
                     steps.append("create_no_music_image")
-                    image = self._renderer.create_no_music_image(RenderOptions(width=width, height=height, grayscale=grayscale_flag))
+                    image = self._renderer.create_no_music_image(
+                        RenderOptions(
+                            width=width,
+                            height=height,
+                            grayscale=grayscale_flag,
+                            text_scale=text_scale_opt,
+                            layout=layout_opt,
+                            wrap=wrap_opt,
+                            max_lines=max_lines_opt,
+                        )
+                    )
                     description = "No music currently playing on Spotify"
 
             # Build a content fingerprint independent of progress/time to decide cache use
-            cache_key = f"{current_fp}|{width}x{height}|{'g' if grayscale_flag else 'c'}|{('svg' if render_mode == 'svg' and self._svg_renderer.available else 'pillow')}"
+            cache_key = (
+                f"{current_fp}|{width}x{height}|{'g' if grayscale_flag else 'c'}|"
+                f"{('svg' if render_mode == 'svg' and self._svg_renderer.available else 'pillow')}|"
+                f"ts={text_scale_opt:.3f}|layout={layout_opt}|wrap={int(wrap_opt)}|ml={max_lines_opt}"
+            )
             cached = self._image_cache.get(cache_key)
             if cached is not None:
                 steps.append("cache_hit")

@@ -14,7 +14,7 @@ Future extension points:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import io
 import logging
 
@@ -29,6 +29,15 @@ class RenderOptions:
     width: int = 800
     height: int = 480
     grayscale: bool = False
+    # Multiplier applied to base font sizes (1.0 = current sizing)
+    text_scale: float = 1.0
+    # Layout mode: "landscape" (art left, text right), "portrait" (art top, text bottom),
+    # "square" (two-column like landscape), or "auto" to infer from aspect ratio.
+    layout: str = "auto"
+    # Allow word-wrapping (instead of single-line ellipsis). Wrapped to max_lines below.
+    wrap: bool = False
+    # Maximum lines per text block when wrap=True (applies to artist/album/track separately)
+    max_lines: int = 2
 
 
 class PillowRenderer:
@@ -65,134 +74,286 @@ class PillowRenderer:
         """
 
         width, height = options.width, options.height
-        margin = int(max(16, min(32, height * 0.04)))  # scale with height, 16–32px
+        # Base spacing scales with height; allow mild increase with text_scale as well
+        margin = int(max(16, min(32, height * 0.04)) * max(0.9, min(1.4, options.text_scale)))
         gutter = int(max(16, min(40, height * 0.05)))
-        right_col_min = 300
-        right_col_width = max(int(width * 0.36), right_col_min)
+
+        # Decide layout
+        layout = (options.layout or "auto").lower()
+        if layout not in {"auto", "landscape", "portrait", "square"}:
+            layout = "auto"
+        if layout == "auto":
+            ar = width / max(1, height)
+            if ar >= 1.2:
+                layout = "landscape"
+            elif ar <= 0.83:
+                layout = "portrait"
+            else:
+                layout = "square"
 
         # Canvas
         image = Image.new("RGB", (width, height), color="black")
         draw = ImageDraw.Draw(image)
 
-        # Compute regions
-        right_col_right = width - margin
-        right_col_left = right_col_right - right_col_width
-        left_area_left = margin
-        left_area_right = right_col_left - gutter
-        left_area_width = max(0, left_area_right - left_area_left)
-        art_size = max(0, min(left_area_width, height - 2 * margin))
+        # Helpers to place album art and compute text region per layout
+        def paste_album_art(x: int, y: int, size: int) -> Tuple[int, int, int, int]:
+            """Paste album art (or draw placeholder) and return its bbox."""
+            album_art = None
+            if track_info.get("album_art_url"):
+                album_art = self.download_album_art(track_info["album_art_url"])
+            if album_art and size > 0:
+                resample = None
+                if hasattr(Image, "Resampling"):
+                    resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+                elif hasattr(Image, "LANCZOS"):
+                    resample = Image.LANCZOS  # type: ignore[attr-defined]
+                fitted = ImageOps.fit(album_art.convert("RGB"), (size, size), method=resample)
+                image.paste(fitted, (x, y))
+            else:
+                placeholder_bbox = [x, y, x + size, y + size]
+                draw.rectangle(placeholder_bbox, fill="#CFCFCF")
+                font_placeholder = self._get_font(max(14, int(height * 0.045)))
+                self._center_in_rect(draw, "Album art here", font_placeholder, placeholder_bbox, fill="#111111")
+            return (x, y, x + size, y + size)
 
-        # Download and paste album art as a square (cover)
-        album_art = None
-        if track_info.get("album_art_url"):
-            album_art = self.download_album_art(track_info["album_art_url"])
-        if album_art and art_size > 0:
-            # Crop to square center and resize (Pillow compatibility for Resampling)
-            resample = None
-            if hasattr(Image, "Resampling"):
-                resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
-            elif hasattr(Image, "LANCZOS"):
-                resample = Image.LANCZOS  # type: ignore[attr-defined]
-            album_art = ImageOps.fit(
-                album_art.convert("RGB"), (art_size, art_size), method=resample
-            )
-            image.paste(album_art, (left_area_left, margin))
-        else:
-            # Placeholder block (light gray) with centered label
-            placeholder_bbox = [left_area_left, margin, left_area_left + art_size, margin + art_size]
-            draw.rectangle(placeholder_bbox, fill="#CFCFCF")
-            ph_text = "Album art here"
-            font_placeholder = self._get_font(max(14, int(height * 0.045)))
-            self._center_in_rect(draw, ph_text, font_placeholder, placeholder_bbox, fill="#111111")
+        # Compute layout-specific regions
+        if layout == "square":
+            # Full-screen album art, no text
+            album_art = None
+            if track_info.get("album_art_url"):
+                album_art = self.download_album_art(track_info["album_art_url"])
+            if album_art:
+                resample = None
+                if hasattr(Image, "Resampling"):
+                    resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+                elif hasattr(Image, "LANCZOS"):
+                    resample = Image.LANCZOS  # type: ignore[attr-defined]
+                fitted = ImageOps.fit(album_art.convert("RGB"), (width, height), method=resample)
+                image.paste(fitted, (0, 0))
+            else:
+                placeholder_bbox = [0, 0, width, height]
+                draw.rectangle(placeholder_bbox, fill="#CFCFCF")
+                font_placeholder = self._get_font(max(14, int(height * 0.06)))
+                self._center_in_rect(draw, "Album art here", font_placeholder, placeholder_bbox, fill="#111111")
+            return image
+        elif layout == "landscape":
+            right_col_min = 300
+            right_col_width = max(int(width * 0.36), right_col_min)
+            right_col_right = width - margin
+            right_col_left = right_col_right - right_col_width
+            left_area_left = margin
+            left_area_right = right_col_left - gutter
+            left_area_width = max(0, left_area_right - left_area_left)
+            art_size = max(0, min(left_area_width, height - 2 * margin))
+            paste_album_art(left_area_left, margin, art_size)
+            text_region = (right_col_left, margin, right_col_right, height - margin)
+            text_align = "right"
+        else:  # portrait
+            # Art on top, centered; text flows below
+            max_art_size = min(width - 2 * margin, int(height * 0.55))
+            art_size = max(0, max_art_size)
+            # Center horizontally
+            art_x = margin + (width - 2 * margin - art_size) // 2
+            paste_album_art(art_x, margin, art_size)
+            text_region = (margin, margin + art_size + gutter, width - margin, height - margin)
+            text_align = "left"
 
-        # Text content and fonts (scale with height)
-        artist_text = track_info.get("artist", "Unknown Artist")
-        album_text = track_info.get("album", "Unknown Album")
-        track_text = track_info.get("name", "Unknown Track")
+        # Text content
+        artist_text = str(track_info.get("artist", "Unknown Artist"))
+        album_text = str(track_info.get("album", "Unknown Album"))
+        track_text = str(track_info.get("name", "Unknown Track"))
 
-        artist_font = self._get_font(max(22, int(height * 0.12)))
-        album_font = self._get_font(max(16, int(height * 0.06)))
-        track_font = self._get_font(max(18, int(height * 0.08)))
+        # Fonts (scale with height and text_scale)
+        base_artist = max(22, int(height * 0.12))
+        base_album = max(16, int(height * 0.06))
+        base_track = max(18, int(height * 0.08))
+        sf = max(0.5, min(2.5, float(options.text_scale or 1.0)))
+        artist_font = self._get_font(int(base_artist * sf))
+        album_font = self._get_font(int(base_album * sf))
+        track_font = self._get_font(int(base_track * sf))
 
-        # Colors
         col_white = "#FFFFFF"
         col_gray = "#B0B0B0"
+        line_gap = max(6, int(height * 0.015 * min(1.5, sf)))
 
-        # Right-align and bottom-stack the three lines within the right column
-        max_text_width = right_col_width
-        line_gap = max(6, int(height * 0.015))
+        # Draw text within text_region
+        tr_l, tr_t, tr_r, tr_b = text_region
+        max_text_width = max(0, tr_r - tr_l)
 
-        # Heights calculated later from fitted text
-
-        y = height - margin  # bottom anchor
-        # Track (bottom)
-        track_fit = self._fit_text(draw, track_text, track_font, max_text_width)
-        track_h2 = self._text_height(draw, track_fit, track_font)
-        y -= track_h2
-        self._draw_right_aligned(draw, track_fit, track_font, right_col_right, y, fill=col_white)
-        y -= line_gap
-        # Album (gray)
-        album_fit = self._fit_text(draw, album_text, album_font, max_text_width)
-        album_h2 = self._text_height(draw, album_fit, album_font)
-        y -= album_h2
-        self._draw_right_aligned(draw, album_fit, album_font, right_col_right, y, fill=col_gray)
-        y -= line_gap
-        # Artist (largest)
-        artist_fit = self._fit_text(draw, artist_text, artist_font, max_text_width)
-        artist_h2 = self._text_height(draw, artist_fit, artist_font)
-        y -= artist_h2
-        self._draw_right_aligned(draw, artist_fit, artist_font, right_col_right, y, fill=col_white)
+        # Build line sets (either wrapped or fitted single-line)
+        if options.wrap:
+            artist_lines = self._wrap_text(draw, artist_text, artist_font, max_text_width, options.max_lines)
+            album_lines = self._wrap_text(draw, album_text, album_font, max_text_width, options.max_lines)
+            track_lines = self._wrap_text(draw, track_text, track_font, max_text_width, options.max_lines)
+            get_block_h = lambda lines, font: self._multiline_height(draw, lines, font, line_gap)
+            draw_block = self._draw_multiline_right_aligned if text_align == "right" else self._draw_multiline_left_aligned
+            # Bottom stack: track, album, artist
+            y = tr_b
+            # Track
+            h_block = get_block_h(track_lines, track_font)
+            y -= h_block
+            draw_block(draw, track_lines, track_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_white)
+            y -= line_gap
+            # Album
+            h_block = get_block_h(album_lines, album_font)
+            y -= h_block
+            draw_block(draw, album_lines, album_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_gray)
+            y -= line_gap
+            # Artist
+            h_block = get_block_h(artist_lines, artist_font)
+            y -= h_block
+            draw_block(draw, artist_lines, artist_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_white)
+        else:
+            # Single-line with ellipsis
+            artist_fit = self._fit_text(draw, artist_text, artist_font, max_text_width)
+            album_fit = self._fit_text(draw, album_text, album_font, max_text_width)
+            track_fit = self._fit_text(draw, track_text, track_font, max_text_width)
+            y = tr_b
+            # Track
+            track_h = self._text_height(draw, track_fit, track_font)
+            y -= track_h
+            if text_align == "right":
+                self._draw_right_aligned(draw, track_fit, track_font, tr_r, y, fill=col_white)
+            else:
+                draw.text((tr_l, y), track_fit, font=track_font, fill=col_white)
+            y -= line_gap
+            # Album
+            album_h = self._text_height(draw, album_fit, album_font)
+            y -= album_h
+            if text_align == "right":
+                self._draw_right_aligned(draw, album_fit, album_font, tr_r, y, fill=col_gray)
+            else:
+                draw.text((tr_l, y), album_fit, font=album_font, fill=col_gray)
+            y -= line_gap
+            # Artist
+            artist_h = self._text_height(draw, artist_fit, artist_font)
+            y -= artist_h
+            if text_align == "right":
+                self._draw_right_aligned(draw, artist_fit, artist_font, tr_r, y, fill=col_white)
+            else:
+                draw.text((tr_l, y), artist_fit, font=artist_font, fill=col_white)
 
         return image
 
     def create_no_music_image(self, options: RenderOptions) -> Image.Image:
-        """Render the same layout without a track – shows placeholders."""
+        """Render the same layout without a track – shows placeholders.
+
+        Honors the same layout/text_scale/wrap options as create_status_image.
+        """
         width, height = options.width, options.height
-        margin = int(max(16, min(32, height * 0.04)))
+        margin = int(max(16, min(32, height * 0.04)) * max(0.9, min(1.4, options.text_scale)))
         gutter = int(max(16, min(40, height * 0.05)))
-        right_col_min = 300
-        right_col_width = max(int(width * 0.36), right_col_min)
+        layout = (options.layout or "auto").lower()
+        if layout not in {"auto", "landscape", "portrait", "square"}:
+            layout = "auto"
+        if layout == "auto":
+            ar = width / max(1, height)
+            if ar >= 1.2:
+                layout = "landscape"
+            elif ar <= 0.83:
+                layout = "portrait"
+            else:
+                layout = "square"
 
         image = Image.new("RGB", (width, height), color="black")
         draw = ImageDraw.Draw(image)
 
-        right_col_right = width - margin
-        right_col_left = right_col_right - right_col_width
-        left_area_left = margin
-        left_area_right = right_col_left - gutter
-        left_area_width = max(0, left_area_right - left_area_left)
-        art_size = max(0, min(left_area_width, height - 2 * margin))
+        # Album art placeholder + text region
+        if layout == "square":
+            # Already returned above; this branch won't execute. Kept for clarity.
+            pass
+        elif layout == "landscape":
+            right_col_min = 300
+            right_col_width = max(int(width * 0.36), right_col_min)
+            right_col_right = width - margin
+            right_col_left = right_col_right - right_col_width
+            left_area_left = margin
+            left_area_right = right_col_left - gutter
+            left_area_width = max(0, left_area_right - left_area_left)
+            art_size = max(0, min(left_area_width, height - 2 * margin))
+            placeholder_bbox = [left_area_left, margin, left_area_left + art_size, margin + art_size]
+            draw.rectangle(placeholder_bbox, fill="#CFCFCF")
+            font_placeholder = self._get_font(max(14, int(height * 0.045)))
+            self._center_in_rect(draw, "Album art here", font_placeholder, placeholder_bbox, fill="#111111")
+            text_region = (right_col_left, margin, right_col_right, height - margin)
+            text_align = "right"
+        else:  # portrait
+            max_art_size = min(width - 2 * margin, int(height * 0.55))
+            art_size = max(0, max_art_size)
+            art_x = margin + (width - 2 * margin - art_size) // 2
+            placeholder_bbox = [art_x, margin, art_x + art_size, margin + art_size]
+            draw.rectangle(placeholder_bbox, fill="#CFCFCF")
+            font_placeholder = self._get_font(max(14, int(height * 0.045)))
+            self._center_in_rect(draw, "Album art here", font_placeholder, placeholder_bbox, fill="#111111")
+            text_region = (margin, margin + art_size + gutter, width - margin, height - margin)
+            text_align = "left"
 
-        # Placeholder album art panel
-        placeholder_bbox = [left_area_left, margin, left_area_left + art_size, margin + art_size]
-        draw.rectangle(placeholder_bbox, fill="#CFCFCF")
-        font_placeholder = self._get_font(max(14, int(height * 0.045)))
-        self._center_in_rect(draw, "Album art here", font_placeholder, placeholder_bbox, fill="#111111")
-
-        # Right column placeholders similar to mock
-        artist_font = self._get_font(max(22, int(height * 0.12)))
-        album_font = self._get_font(max(16, int(height * 0.06)))
-        track_font = self._get_font(max(18, int(height * 0.08)))
+        # Fonts
+        base_artist = max(22, int(height * 0.12))
+        base_album = max(16, int(height * 0.06))
+        base_track = max(18, int(height * 0.08))
+        sf = max(0.5, min(2.5, float(options.text_scale or 1.0)))
+        artist_font = self._get_font(int(base_artist * sf))
+        album_font = self._get_font(int(base_album * sf))
+        track_font = self._get_font(int(base_track * sf))
 
         col_white = "#FFFFFF"
         col_gray = "#B0B0B0"
-        line_gap = max(6, int(height * 0.015))
+        line_gap = max(6, int(height * 0.015 * min(1.5, sf)))
+        tr_l, tr_t, tr_r, tr_b = text_region
+        max_text_width = max(0, tr_r - tr_l)
 
-        y = height - margin
-        track_text = "Track Name"
-        track_h = self._text_height(draw, track_text, track_font)
-        y -= track_h
-        self._draw_right_aligned(draw, track_text, track_font, right_col_right, y, fill=col_white)
-        y -= line_gap
-        album_text = "Album Name"
-        album_h = self._text_height(draw, album_text, album_font)
-        y -= album_h
-        self._draw_right_aligned(draw, album_text, album_font, right_col_right, y, fill=col_gray)
-        y -= line_gap
+        # Placeholder text
         artist_text = "Artist Name"
-        artist_h = self._text_height(draw, artist_text, artist_font)
-        y -= artist_h
-        self._draw_right_aligned(draw, artist_text, artist_font, right_col_right, y, fill=col_white)
+        album_text = "Album Name"
+        track_text = "Track Name"
+
+        if layout == "square":
+            # Should not reach here; text suppressed in square mode.
+            return image
+        if options.wrap:
+            artist_lines = self._wrap_text(draw, artist_text, artist_font, max_text_width, options.max_lines)
+            album_lines = self._wrap_text(draw, album_text, album_font, max_text_width, options.max_lines)
+            track_lines = self._wrap_text(draw, track_text, track_font, max_text_width, options.max_lines)
+            get_block_h = lambda lines, font: self._multiline_height(draw, lines, font, line_gap)
+            draw_block = self._draw_multiline_right_aligned if text_align == "right" else self._draw_multiline_left_aligned
+            y = tr_b
+            h_block = get_block_h(track_lines, track_font)
+            y -= h_block
+            draw_block(draw, track_lines, track_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_white)
+            y -= line_gap
+            h_block = get_block_h(album_lines, album_font)
+            y -= h_block
+            draw_block(draw, album_lines, album_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_gray)
+            y -= line_gap
+            h_block = get_block_h(artist_lines, artist_font)
+            y -= h_block
+            draw_block(draw, artist_lines, artist_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_white)
+        else:
+            artist_fit = self._fit_text(draw, artist_text, artist_font, max_text_width)
+            album_fit = self._fit_text(draw, album_text, album_font, max_text_width)
+            track_fit = self._fit_text(draw, track_text, track_font, max_text_width)
+            y = tr_b
+            track_h = self._text_height(draw, track_fit, track_font)
+            y -= track_h
+            if text_align == "right":
+                self._draw_right_aligned(draw, track_fit, track_font, tr_r, y, fill=col_white)
+            else:
+                draw.text((tr_l, y), track_fit, font=track_font, fill=col_white)
+            y -= line_gap
+            album_h = self._text_height(draw, album_fit, album_font)
+            y -= album_h
+            if text_align == "right":
+                self._draw_right_aligned(draw, album_fit, album_font, tr_r, y, fill=col_gray)
+            else:
+                draw.text((tr_l, y), album_fit, font=album_font, fill=col_gray)
+            y -= line_gap
+            artist_h = self._text_height(draw, artist_fit, artist_font)
+            y -= artist_h
+            if text_align == "right":
+                self._draw_right_aligned(draw, artist_fit, artist_font, tr_r, y, fill=col_white)
+            else:
+                draw.text((tr_l, y), artist_fit, font=artist_font, fill=col_white)
 
         return image
 
@@ -248,6 +409,94 @@ class PillowRenderer:
         while s and int(draw.textlength(s + ellipsis, font=font)) > max_width:
             s = s[:-1]
         return (s + ellipsis) if s else ""
+
+    # --- Word wrapping helpers ---
+    def _wrap_text(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        font: ImageFont.ImageFont,
+        max_width: int,
+        max_lines: int,
+    ) -> List[str]:
+        """Wrap text into lines that fit within max_width using pixel measurement.
+
+        If the text exceeds max_lines, the last line is ellipsized to fit.
+        """
+        if not text:
+            return [""]
+        words = text.split()
+        lines: List[str] = []
+        current: List[str] = []
+        i = 0
+        n = len(words)
+        while i < n:
+            w = words[i]
+            candidate = (" ".join(current + [w])).strip()
+            if int(draw.textlength(candidate, font=font)) <= max_width or not current:
+                current.append(w)
+                i += 1
+            else:
+                lines.append(" ".join(current))
+                current = []
+                if len(lines) >= max_lines - 1:
+                    # Last line; fit the remaining words with ellipsis
+                    rest = " ".join(words[i:])
+                    lines.append(self._fit_text(draw, rest, font, max_width))
+                    return lines[:max_lines]
+        if current:
+            lines.append(" ".join(current))
+        # Truncate if too many lines
+        if len(lines) > max_lines:
+            kept = lines[: max_lines - 1]
+            kept.append(self._fit_text(draw, lines[max_lines - 1] + " " + " ".join(lines[max_lines:]), font, max_width))
+            return kept
+        return lines
+
+    def _multiline_height(
+        self,
+        draw: ImageDraw.ImageDraw,
+        lines: List[str],
+        font: ImageFont.ImageFont,
+        line_gap: int,
+    ) -> int:
+        return sum(self._text_height(draw, ln, font) for ln in lines) + line_gap * (max(0, len(lines) - 1))
+
+    def _draw_multiline_right_aligned(
+        self,
+        draw: ImageDraw.ImageDraw,
+        lines: List[str],
+        font: ImageFont.ImageFont,
+        right_x: int,
+        y: int,
+        max_width: int,
+        line_gap: int,
+        *,
+        fill: str = "#FFFFFF",
+    ) -> None:
+        for i, ln in enumerate(lines):
+            try:
+                draw.text((right_x, y), ln, font=font, fill=fill, anchor="rt")
+            except (TypeError, ValueError):
+                tw = int(draw.textlength(ln, font=font))
+                draw.text((right_x - min(tw, max_width), y), ln, font=font, fill=fill)
+            y += self._text_height(draw, ln, font) + (line_gap if i < len(lines) - 1 else 0)
+
+    def _draw_multiline_left_aligned(
+        self,
+        draw: ImageDraw.ImageDraw,
+        lines: List[str],
+        font: ImageFont.ImageFont,
+        left_x: int,
+        y: int,
+        max_width: int,
+        line_gap: int,
+        *,
+        fill: str = "#FFFFFF",
+    ) -> None:
+        for i, ln in enumerate(lines):
+            draw.text((left_x, y), ln, font=font, fill=fill)
+            y += self._text_height(draw, ln, font) + (line_gap if i < len(lines) - 1 else 0)
 
     def _draw_right_aligned(
         self,
