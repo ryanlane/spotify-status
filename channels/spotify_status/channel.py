@@ -204,6 +204,8 @@ class SpotifyStatusChannel:
         self.data_dir = self.channel_dir / "data"
         self.ui_dir = self.channel_dir / "ui"
         self.settings_path = self.data_dir / "settings.json"
+        # Persisted lightweight state (for cross-instance distribution gating)
+        self.state_path = self.data_dir / "state.json"
         # Allow token/cache directory override via config or environment so a
         # containerized deployment can mount a persistent volume and avoid
         # re-authorization on every new container.
@@ -319,6 +321,15 @@ class SpotifyStatusChannel:
         
         logger.info(f"Spotify Status Channel initialized: {self.channel_dir}")
 
+        # Load lightweight state (persisted across restarts) to keep distribution_mode stable
+        try:
+            state = self._load_state()
+            if state and isinstance(state.get("last_fingerprint"), str):
+                self._last_track_fingerprint = state["last_fingerprint"]
+                logger.debug("[SpotifyStatusChannel] Loaded last_fingerprint from state: %s", self._last_track_fingerprint)
+        except Exception as st_e:  # noqa: BLE001
+            logger.debug("[SpotifyStatusChannel] No prior state loaded: %s", st_e)
+
     # ------------------------------------------------------------------
     # Settings Persistence
     # ------------------------------------------------------------------
@@ -340,6 +351,37 @@ class SpotifyStatusChannel:
         except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to save settings: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Lightweight State Persistence (for distribution gating)
+    # ------------------------------------------------------------------
+    def _load_state(self) -> Optional[Dict[str, Any]]:
+        """Load lightweight persisted state (last fingerprint etc.)."""
+        try:
+            if not self.state_path.exists():
+                return None
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _save_state(self, last_fingerprint: Optional[str]) -> None:
+        """Persist minimal state to survive process restarts.
+
+        Args:
+            last_fingerprint: The most recent content fingerprint computed.
+        """
+        try:
+            payload = {
+                "last_fingerprint": last_fingerprint,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "version": 1,
+            }
+            with open(self.state_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+        except Exception:  # noqa: BLE001
+            # Best-effort; do not fail requests due to state persistence issues
+            pass
     
     def _initialize_spotify_client(self):
         """Initialize Spotify API client with OAuth"""
@@ -601,7 +643,9 @@ class SpotifyStatusChannel:
                     str(t.get("name") or t.get("track_name") or ""),
                 ])
             current_fp = _fp(track_info)
-            distribution_mode = "new" if (self._last_track_fingerprint is None or current_fp != self._last_track_fingerprint) else "existing"
+            # Determine distribution mode comparing to persisted/loaded last fingerprint
+            prior_fp = self._last_track_fingerprint
+            distribution_mode = "new" if (prior_fp is None or current_fp != prior_fp) else "existing"
 
             image = None
             if render_mode == "svg" and self._svg_renderer.available:
@@ -657,8 +701,12 @@ class SpotifyStatusChannel:
                     "render_mode": ("svg" if render_mode == "svg" and self._svg_renderer.available else "pillow"),
                     "content_fingerprint": current_fp,
                 }
-                # Update fingerprint for next call
+                # Update fingerprint for next call and persist state
                 self._last_track_fingerprint = current_fp
+                try:
+                    self._save_state(self._last_track_fingerprint)
+                except Exception:  # noqa: BLE001
+                    pass
                 return result
 
             if grayscale_flag:
@@ -699,6 +747,7 @@ class SpotifyStatusChannel:
                 "track_info": track_info,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "steps": steps,
+                "distribution_mode": distribution_mode,
                 # Back-compat (some consumers may still read top-level fields)
                 "bytes": raw_bytes,
                 "content_type": content_type,
@@ -735,8 +784,12 @@ class SpotifyStatusChannel:
                 # maintain legacy pathway (string) while keeping dict for new pipeline
                 result["image_base64"] = image_base64
                 result["image"]["base64"] = image_base64
-            # Update fingerprint at end so next call can detect unchanged content
+            # Update fingerprint at end so next call can detect unchanged content; persist as well
             self._last_track_fingerprint = current_fp
+            try:
+                self._save_state(self._last_track_fingerprint)
+            except Exception:  # noqa: BLE001
+                pass
             return result
         except Exception as e:  # noqa: BLE001
             logger.exception("[SpotifyStatusChannel] Failed to generate image at step %s: %s", steps[-1] if steps else 'start', e)
