@@ -179,3 +179,5 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+channels/spotify_status/test_landscape.png
+channels/spotify_status/imagegen.py
