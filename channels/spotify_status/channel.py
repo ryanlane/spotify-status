@@ -329,6 +329,14 @@ class SpotifyStatusChannel:
                 logger.debug("[SpotifyStatusChannel] Loaded last_fingerprint from state: %s", self._last_track_fingerprint)
         except Exception as st_e:  # noqa: BLE001
             logger.debug("[SpotifyStatusChannel] No prior state loaded: %s", st_e)
+            # Optional push emission gating: only emit at track start
+            self.emit_only_at_track_start = bool(se_spotify_cfg.get("emit_only_at_track_start", False))
+            self.start_threshold_pct = float(se_spotify_cfg.get("start_threshold_pct", 3.0))
+            self.start_threshold_sec = float(se_spotify_cfg.get("start_threshold_sec", 0.0))
+        # Progress reset detection options
+        self.emit_on_progress_reset = bool(se_spotify_cfg.get("emit_on_progress_reset", True))
+        self.progress_reset_threshold_sec = float(se_spotify_cfg.get("progress_reset_threshold_sec", 1.5))
+        self.progress_reset_floor_pct = float(se_spotify_cfg.get("progress_reset_floor_pct", 5.0))
 
     # ------------------------------------------------------------------
     # Settings Persistence
@@ -600,6 +608,12 @@ class SpotifyStatusChannel:
             "listeners": pm.listener_count() if pm else 0,
             "push_active": bool(pm and pm.thread_alive()),
             "poll_interval": self.push_poll_interval,
+                "emit_only_at_track_start": getattr(self, "emit_only_at_track_start", False),
+                "start_threshold_pct": getattr(self, "start_threshold_pct", None),
+            "start_threshold_sec": getattr(self, "start_threshold_sec", None),
+            "emit_on_progress_reset": getattr(self, "emit_on_progress_reset", None),
+            "progress_reset_threshold_sec": getattr(self, "progress_reset_threshold_sec", None),
+            "progress_reset_floor_pct": getattr(self, "progress_reset_floor_pct", None),
         }
     
     async def request_image(self, request_data: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -860,6 +874,12 @@ class SpotifyStatusChannel:
                 early_wake_offset_sec=self.early_wake_offset_sec,
                 emit_playback_state_events=self.emit_playback_state_events,
                 playback_state_debounce_sec=self.playback_state_debounce_sec,
+                    emit_only_at_track_start=self.emit_only_at_track_start,
+                    start_threshold_pct=self.start_threshold_pct,
+                start_threshold_sec=self.start_threshold_sec,
+                emit_on_progress_reset=self.emit_on_progress_reset,
+                progress_reset_threshold_sec=self.progress_reset_threshold_sec,
+                progress_reset_floor_pct=self.progress_reset_floor_pct,
             )
 
     def register_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:

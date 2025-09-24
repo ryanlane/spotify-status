@@ -31,6 +31,12 @@ class PushManager:
         early_wake_offset_sec: float = 0.5,
         emit_playback_state_events: bool = False,
         playback_state_debounce_sec: float = 1.0,
+        emit_only_at_track_start: bool = False,
+        start_threshold_pct: float = 3.0,
+        start_threshold_sec: float = 0.0,
+        emit_on_progress_reset: bool = True,
+        progress_reset_threshold_sec: float = 1.5,
+        progress_reset_floor_pct: float = 5.0,
     ):
         """Create push manager.
 
@@ -68,6 +74,16 @@ class PushManager:
             (getattr(__import__('os'), 'environ', {}).get('SPOTIFY_STATUS_MIN_EMIT_INTERVAL') or 0)  # 0 disables
         )
         self._last_emit_ts: Optional[float] = None
+        # Start-of-track emission gating (optional)
+        self._emit_only_at_track_start = bool(emit_only_at_track_start)
+        self._start_threshold_pct = max(0.0, float(start_threshold_pct))
+        self._start_threshold_sec = max(0.0, float(start_threshold_sec))
+        # Progress reset detection (detect restarts/skips in place when metadata unchanged)
+        self._emit_on_progress_reset = bool(emit_on_progress_reset)
+        self._progress_reset_threshold_ms = max(0.0, float(progress_reset_threshold_sec)) * 1000.0
+        self._progress_reset_floor_pct = max(0.0, float(progress_reset_floor_pct))
+        self._last_progress_ms: Optional[int] = None
+        self._last_duration_ms: Optional[int] = None
 
     # Listener management -------------------------------------------------
     def add_listener(self, callback: Callable[[Dict[str, Any]], None]):
@@ -241,8 +257,50 @@ class PushManager:
         ]
         fingerprint = '|'.join(fp_parts)
 
-        # Determine if we should emit: fingerprint changed OR forced OR transitioning from None
-        should_emit = force or metadata_changed or (self._last_fingerprint is None and fingerprint)
+        # Detect progress reset (progress decreased significantly near start)
+        duration_ms = int(track.get("duration_ms") or 0)
+        progress_ms = int(track.get("progress_ms") or 0)
+        progress_reset = False
+        if (
+            self._emit_on_progress_reset
+            and self._last_progress_ms is not None
+            and progress_ms + self._progress_reset_threshold_ms < self._last_progress_ms
+        ):
+            # Optional floor check to ensure we're near start (avoid spurious seeks backwards)
+            progress_pct = (progress_ms / duration_ms * 100.0) if duration_ms else 0.0
+            if progress_pct <= self._progress_reset_floor_pct:
+                progress_reset = True
+
+        # Determine if we should emit: fingerprint changed OR forced OR transitioning from None OR progress reset
+        should_emit = force or metadata_changed or (self._last_fingerprint is None and fingerprint) or progress_reset
+
+        # If configured, when this is the initial sync (no prior fingerprint) and we're mid-track,
+        # suppress the emit until the next actual track change.
+        if (
+            should_emit
+            and not force
+            and self._emit_only_at_track_start
+            and self._last_fingerprint is None
+            and not metadata_changed
+        ):
+            duration_ms = track.get("duration_ms") or 0
+            progress_ms = track.get("progress_ms") or 0
+            progress_pct = (progress_ms / duration_ms * 100.0) if duration_ms else 0.0
+            progress_sec = progress_ms / 1000.0
+            allow = True
+            if self._start_threshold_pct > 0.0 and progress_pct > self._start_threshold_pct:
+                allow = False
+            if self._start_threshold_sec > 0.0 and progress_sec > self._start_threshold_sec:
+                allow = False
+            if not allow:
+                # Record current metadata so the next boundary will be detected, but do not emit now
+                self._last_track_id = track_id
+                self._last_is_playing = is_playing  # type: ignore[assignment]
+                self._last_artist_name = artist_name
+                self._last_album_name = album_name
+                self._last_track_name = track_name
+                self._last_fingerprint = fingerprint
+                return False
 
         # Enforce optional min interval when fingerprint unchanged but force requested
         if should_emit and not metadata_changed and not force and self._min_emit_interval > 0:
@@ -252,6 +310,9 @@ class PushManager:
 
         if not should_emit:
             self._last_is_playing = is_playing  # type: ignore[assignment]
+            # Update last progress/duration for future reset detection
+            self._last_progress_ms = progress_ms
+            self._last_duration_ms = duration_ms
             return False
 
         event_type = "now_playing_changed"
@@ -269,6 +330,8 @@ class PushManager:
         self._last_track_name = track_name
         self._last_fingerprint = fingerprint
         self._last_emit_ts = time.time()
+        self._last_progress_ms = progress_ms
+        self._last_duration_ms = duration_ms
         self._dispatch(event)
         return True
 
