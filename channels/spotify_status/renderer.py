@@ -31,14 +31,21 @@ class RenderOptions:
     grayscale: bool = False
     # Multiplier applied to base font sizes (1.0 = current sizing)
     # Default bumped to make text more legible on landscape displays
-    text_scale: float = 1.4
+    text_scale: float = 0.5
     # Layout mode: "landscape" (art left, text right), "portrait" (art top, text bottom),
     # "square" (two-column like landscape), or "auto" to infer from aspect ratio.
-    layout: str = "auto"
+    layout: str = "landscape"
     # Allow word-wrapping (instead of single-line ellipsis). Wrapped to max_lines below.
-    wrap: bool = False
+    wrap: bool = True
     # Maximum lines per text block when wrap=True (applies to artist/album/track separately)
-    max_lines: int = 2
+    max_lines: int = 3
+    # Extra multiplier for spacing between text lines. 1.0 keeps current visual,
+    # >1.0 adds more breathing room, <1.0 tightens. Applied after size-based calc.
+    line_gap_scale: float = 2.0
+    # Multiplier for spacing between stacked text sections (track ↕ album ↕ artist).
+    # Lets you decouple block spacing from intra-line spacing. 1.0 preserves
+    # existing look; >1.0 increases the gap between sections.
+    section_gap_scale: float = 2.0
     # Right text column sizing in landscape mode. The column width is computed as
     # max(width * right_col_ratio, right_col_min). We will also shrink the column down
     # to the minimum if needed to allow album art to reach full height if width permits.
@@ -178,11 +185,11 @@ class PillowRenderer:
         album_text = str(track_info.get("album", "Unknown Album"))
         track_text = str(track_info.get("name", "Unknown Track"))
 
-        # Fonts (scale with height and text_scale). Base percentages chosen for
-        # strong readability on 480px-tall landscape displays; adjust with text_scale.
-        base_artist = max(22, int(height * 0.14))
-        base_album = max(16, int(height * 0.08))
-        base_track = max(18, int(height * 0.10))
+        # Fonts (scale with height and text_scale). Use same strong ratios as landscape
+        # so text_scale changes are clearly visible in portrait as well.
+        base_artist = max(18, int(height * 0.05))
+        base_album = max(18, int(height * 0.05))
+        base_track = max(18, int(height * 0.05))
         sf = max(0.5, min(2.5, float(options.text_scale or 1.0)))
         artist_font = self._get_font(int(base_artist * sf))
         album_font = self._get_font(int(base_album * sf))
@@ -190,7 +197,8 @@ class PillowRenderer:
 
         col_white = "#FFFFFF"
         col_gray = "#B0B0B0"
-        line_gap = max(6, int(height * 0.015 * min(1.5, sf)))
+        line_gap = max(6, int(height * 0.015 * min(1.5, sf) * max(0.5, float(getattr(options, "line_gap_scale", 1.0)))))
+        section_gap = max(2, int(line_gap * max(0.2, min(3.0, float(getattr(options, "section_gap_scale", 1.0))))))
 
         # Draw text within text_region
         tr_l, _tr_t, tr_r, tr_b = text_region
@@ -209,12 +217,12 @@ class PillowRenderer:
             h_block = get_block_h(track_lines, track_font)
             y -= h_block
             draw_block(draw, track_lines, track_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_white)
-            y -= line_gap
+            y -= section_gap
             # Album
             h_block = get_block_h(album_lines, album_font)
             y -= h_block
             draw_block(draw, album_lines, album_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_gray)
-            y -= line_gap
+            y -= section_gap
             # Artist
             h_block = get_block_h(artist_lines, artist_font)
             y -= h_block
@@ -232,7 +240,7 @@ class PillowRenderer:
                 self._draw_right_aligned(draw, track_fit, track_font, tr_r, y, fill=col_white)
             else:
                 draw.text((tr_l, y), track_fit, font=track_font, fill=col_white)
-            y -= line_gap
+            y -= section_gap
             # Album
             album_h = self._text_height(draw, album_fit, album_font)
             y -= album_h
@@ -240,7 +248,7 @@ class PillowRenderer:
                 self._draw_right_aligned(draw, album_fit, album_font, tr_r, y, fill=col_gray)
             else:
                 draw.text((tr_l, y), album_fit, font=album_font, fill=col_gray)
-            y -= line_gap
+            y -= section_gap
             # Artist
             artist_h = self._text_height(draw, artist_fit, artist_font)
             y -= artist_h
@@ -315,8 +323,8 @@ class PillowRenderer:
             text_align = "left"
 
         # Fonts
-        base_artist = max(22, int(height * 0.14))
-        base_album = max(16, int(height * 0.08))
+        base_artist = max(18, int(height * 0.14))
+        base_album = max(18, int(height * 0.08))
         base_track = max(18, int(height * 0.10))
         sf = max(0.5, min(2.5, float(options.text_scale or 1.0)))
         artist_font = self._get_font(int(base_artist * sf))
@@ -325,7 +333,8 @@ class PillowRenderer:
 
         col_white = "#FFFFFF"
         col_gray = "#B0B0B0"
-        line_gap = max(6, int(height * 0.015 * min(1.5, sf)))
+        line_gap = max(6, int(height * 0.015 * min(1.5, sf) * max(0.5, float(getattr(options, "line_gap_scale", 1.0)))))
+        section_gap = max(2, int(line_gap * max(0.2, min(3.0, float(getattr(options, "section_gap_scale", 1.0))))))
         tr_l, _tr_t, tr_r, tr_b = text_region
         max_text_width = max(0, tr_r - tr_l)
 
@@ -345,11 +354,11 @@ class PillowRenderer:
             h_block = get_block_h(track_lines, track_font)
             y -= h_block
             draw_block(draw, track_lines, track_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_white)
-            y -= line_gap
+            y -= section_gap
             h_block = get_block_h(album_lines, album_font)
             y -= h_block
             draw_block(draw, album_lines, album_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_gray)
-            y -= line_gap
+            y -= section_gap
             h_block = get_block_h(artist_lines, artist_font)
             y -= h_block
             draw_block(draw, artist_lines, artist_font, tr_r if text_align == "right" else tr_l, y, max_text_width, line_gap, fill=col_white)
@@ -364,14 +373,14 @@ class PillowRenderer:
                 self._draw_right_aligned(draw, track_fit, track_font, tr_r, y, fill=col_white)
             else:
                 draw.text((tr_l, y), track_fit, font=track_font, fill=col_white)
-            y -= line_gap
+            y -= section_gap
             album_h = self._text_height(draw, album_fit, album_font)
             y -= album_h
             if text_align == "right":
                 self._draw_right_aligned(draw, album_fit, album_font, tr_r, y, fill=col_gray)
             else:
                 draw.text((tr_l, y), album_fit, font=album_font, fill=col_gray)
-            y -= line_gap
+            y -= section_gap
             artist_h = self._text_height(draw, artist_fit, artist_font)
             y -= artist_h
             if text_align == "right":
