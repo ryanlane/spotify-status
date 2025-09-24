@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple, List
 import io
 import logging
+import os
+import glob
 
 import requests  # type: ignore
 from PIL import Image, ImageDraw, ImageFont, ImageOps  # type: ignore
@@ -51,6 +53,15 @@ class RenderOptions:
     # to the minimum if needed to allow album art to reach full height if width permits.
     right_col_ratio: float = 0.34
     right_col_min: int = 220
+    # Optional custom fonts. If provided, these paths are used to render text.
+    # - font_path: applied to all text blocks unless a specific override is set
+    # - artist_font_path / album_font_path / track_font_path: per-block overrides
+    # font_path: Optional[str] = None
+    font_path: str = "fonts/RobotoCondensed-Light.ttf"
+    # artist_font_path: Optional[str] = None
+    artist_font_path: str = "fonts/RobotoCondensed-Medium.ttf"
+    album_font_path: str = "fonts/RobotoCondensed-Light.ttf"
+    track_font_path: str = "fonts/RobotoCondensed-Light.ttf"
 
 
 class PillowRenderer:
@@ -191,9 +202,9 @@ class PillowRenderer:
         base_album = max(18, int(height * 0.05))
         base_track = max(18, int(height * 0.05))
         sf = max(0.5, min(2.5, float(options.text_scale or 1.0)))
-        artist_font = self._get_font(int(base_artist * sf))
-        album_font = self._get_font(int(base_album * sf))
-        track_font = self._get_font(int(base_track * sf))
+        artist_font = self._get_font_from_paths(int(base_artist * sf), options.artist_font_path or options.font_path)
+        album_font = self._get_font_from_paths(int(base_album * sf), options.album_font_path or options.font_path)
+        track_font = self._get_font_from_paths(int(base_track * sf), options.track_font_path or options.font_path)
 
         col_white = "#FFFFFF"
         col_gray = "#B0B0B0"
@@ -327,9 +338,9 @@ class PillowRenderer:
         base_album = max(18, int(height * 0.08))
         base_track = max(18, int(height * 0.10))
         sf = max(0.5, min(2.5, float(options.text_scale or 1.0)))
-        artist_font = self._get_font(int(base_artist * sf))
-        album_font = self._get_font(int(base_album * sf))
-        track_font = self._get_font(int(base_track * sf))
+        artist_font = self._get_font_from_paths(int(base_artist * sf), options.artist_font_path or options.font_path)
+        album_font = self._get_font_from_paths(int(base_album * sf), options.album_font_path or options.font_path)
+        track_font = self._get_font_from_paths(int(base_track * sf), options.track_font_path or options.font_path)
 
         col_white = "#FFFFFF"
         col_gray = "#B0B0B0"
@@ -413,10 +424,19 @@ class PillowRenderer:
     def _get_font(self, size: int) -> ImageFont.ImageFont:
         """Return a scalable TrueType font of the requested size.
 
-        On many Linux systems, "arial.ttf" isn't available; Pillow ships with
-        DejaVu fonts which are reliable for scaling. We try a short list before
-        falling back to the bitmap default.
+        Preference order:
+        1) Any .ttf/.otf in this module's local "fonts" directory (repo-provided)
+        2) Common system/bundled fonts (DejaVuSans, Arial, LiberationSans, NotoSans)
+        3) Pillow's bitmap default as a last resort
         """
+        # 1) Try repo-provided fonts first (channels/spotify_status/fonts)
+        for path in self._local_font_candidates():
+            try:
+                return ImageFont.truetype(path, size)
+            except OSError:
+                continue
+
+        # 2) Fallback to common system/bundled fonts
         candidates = [
             "DejaVuSans.ttf",  # bundled with Pillow
             "arial.ttf",
@@ -428,8 +448,60 @@ class PillowRenderer:
                 return ImageFont.truetype(name, size)
             except OSError:
                 continue
-        # Last resort (bitmap, non-scalable)
+
+        # 3) Last resort (bitmap, non-scalable)
         return ImageFont.load_default()
+
+    def _local_font_candidates(self) -> List[str]:
+        """Return a list of local font file paths to try (deterministic order).
+
+        Looks for a "fonts" folder next to this file and returns .ttf/.otf files.
+        Prefers known Roboto Condensed variants if present, then any others sorted.
+        """
+        fonts: List[str] = []
+        base_dir = os.path.dirname(__file__)
+        fonts_dir = os.path.join(base_dir, "fonts")
+        if not os.path.isdir(fonts_dir):
+            return fonts
+
+        # Preferred names first if they exist
+        preferred = [
+            "RobotoCondensed-Light.ttf",
+            "RobotoCondensed-Regular.ttf",
+            "Roboto-Regular.ttf",
+            "Roboto.ttf",
+        ]
+        for name in preferred:
+            p = os.path.join(fonts_dir, name)
+            if os.path.isfile(p):
+                fonts.append(p)
+
+        # Then any other .ttf/.otf files (case-insensitive), sorted for stability
+        seen = set(fonts)
+        patterns = ("*.ttf", "*.otf", "*.TTF", "*.OTF")
+        for pat in patterns:
+            for p in sorted(glob.glob(os.path.join(fonts_dir, pat))):
+                if p not in seen:
+                    fonts.append(p)
+                    seen.add(p)
+        return fonts
+
+    def _get_font_from_paths(self, size: int, preferred_path: Optional[str]) -> ImageFont.ImageFont:
+        """Return a TrueType font using a preferred path if provided, else fall back.
+
+        Args:
+            size: Font size in pixels.
+            preferred_path: Path to a .ttf/.otf font file to try first.
+
+        Returns:
+            A Pillow ImageFont instance for the given size.
+        """
+        if preferred_path:
+            try:
+                return ImageFont.truetype(preferred_path, size)
+            except OSError as e:  # invalid path or unreadable font
+                logger.warning("Failed to load custom font '%s': %s; falling back to defaults", preferred_path, e)
+        return self._get_font(size)
 
     def _text_bbox(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> Tuple[int, int, int, int]:
         # textbbox returns (left, top, right, bottom) on modern Pillow
