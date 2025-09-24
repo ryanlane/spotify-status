@@ -181,3 +181,4 @@ cython_debug/
 .cursorindexingignore
 channels/spotify_status/test_landscape.png
 channels/spotify_status/imagegen.py
+channels/spotify_status/test_portrait.png
