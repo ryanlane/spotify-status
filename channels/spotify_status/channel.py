@@ -645,8 +645,27 @@ class SpotifyStatusChannel:
         try:
             steps.append("parse_options")
             options = request_data.get("options", {}) if request_data else {}
-            width = int(options.get("width", 800) or 800)
-            height = int(options.get("height", 480) or 480)
+            settings_block = request_data.get("settings", {}) if request_data else {}
+            # Prefer explicit options.width/height; fall back to settings.resolution if missing
+            raw_w = options.get("width") if isinstance(options, dict) else None
+            raw_h = options.get("height") if isinstance(options, dict) else None
+            if (raw_w is None or raw_h is None):
+                res = settings_block.get("resolution") if isinstance(settings_block, dict) else None
+                if isinstance(res, (list, tuple)) and len(res) == 2:
+                    if raw_w is None:
+                        raw_w = res[0]
+                    if raw_h is None:
+                        raw_h = res[1]
+            # Final fallback defaults
+            width = int(raw_w or 800)
+            height = int(raw_h or 480)
+            # If orientation supplied and square but width!=height, harmonize by choosing min side
+            orientation_hint = (settings_block.get("orientation") or options.get("orientation") if isinstance(options, dict) else None)
+            if isinstance(orientation_hint, str) and orientation_hint.lower() == "square" and width != height:
+                side = min(width, height)
+                width = height = side
+                steps.append("square_orientation_harmonized")
+            logger.debug("[SpotifyStatusChannel] resolved_dimensions width=%s height=%s options_keys=%s settings=%s", width, height, list(options.keys()) if isinstance(options, dict) else None, settings_block)
             grayscale_flag = bool(options.get("grayscale", False))
             render_mode = str(options.get("render_mode", "pillow")).lower()
             # Rendering behavior options
