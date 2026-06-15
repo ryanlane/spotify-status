@@ -190,7 +190,7 @@ def build_router(channel: ChannelProtocol) -> APIRouter:
                     # process restart or waiting for a lazy accessor.
                     try:  # noqa: BLE001
                         adaptive_cache_ttl = max(1, min(5, channel.push_poll_interval - 1))
-                        from service import SpotifyService  # type: ignore
+                        from ..service import SpotifyService
                         channel.spotify_service = SpotifyService(channel.spotify_client, cache_ttl=adaptive_cache_ttl)  # type: ignore[attr-defined]
                     except Exception:
                         # Non-fatal; lazy creation path in channel.get_current_track will recover.

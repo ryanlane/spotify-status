@@ -2,13 +2,15 @@
   "id": "com.spotify.status",
   "name": "Spotify Status Channel",
   "description": "Display currently playing Spotify track album art and metadata",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "embedded",
   "entry_point": "channel.py",
   "class_name": "SpotifyStatusChannel",
   "icon": "music",
-  "author": "Mimir Platform",
+  "author": "Ryan Lane",
   "tags": ["spotify", "music", "album-art", "display", "status"],
+  "schemaVersion": "2.4",
+  "settingsType": "advanced",
   "config": {
     "supports_upload": false,
     "supports_gallery": false,
@@ -21,6 +23,112 @@
     "python": ">=3.8",
     "dependencies": ["fastapi", "requests", "pillow", "spotipy"]
   },
+  "update_schedule": {
+    "unit": "minutes",
+    "duration": 15,
+    "settings_driven": true,
+    "settings_key": "slideshow_interval"
+  },
+  "settings": {
+    "defaults": {
+      "client_id": "YOUR_SPOTIFY_CLIENT_ID_HERE",
+      "client_secret": "YOUR_SPOTIFY_CLIENT_SECRET_HERE",
+      "redirect_uri": "http://127.0.0.1:5000/api/channels/com.spotify.status/callback",
+      "update_interval_unit": "minutes",
+      "update_interval_value": 30,
+      "visual": "Album Art"
+    },
+    "schema": {
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "type": "string",
+          "title": "Spotify API Client ID",
+          "description": "Your Spotify API Client ID (from Spotify Developer Dashboard)",
+          "default": "YOUR_SPOTIFY_CLIENT_ID_HERE"
+        },
+        "client_secret": {
+          "type": "string",
+          "title": "Spotify API Client Secret",
+          "description": "Your Spotify API Client Secret (never share publicly)",
+          "default": "YOUR_SPOTIFY_CLIENT_SECRET_HERE"
+        },
+        "redirect_uri": {
+          "type": "string",
+          "title": "Spotify API Redirect URI",
+          "description": "Your Spotify API Redirect URI",
+          "default": "http://127.0.0.1:5000/api/channels/com.spotify.status/callback"
+        },
+        "visual": {
+          "type": "string",
+          "enum": ["Album Art", "Album, Artist, and Title", "Top Items"],
+          "title": "Spotify Visual Option",
+          "description": "What do you want to display?"
+        },
+        "orientation": {
+          "type": "string",
+          "enum": ["portrait", "landscape"],
+          "title": "Display Mode",
+          "description": "How to fit images to display"
+        },
+        "update_interval_unit": {
+          "type": "string",
+          "enum": ["days", "hours", "minutes", "seconds"],
+          "title": "Update Interval Unit",
+          "description": "Unit for channel update frequency",
+          "default": "minutes"
+        },
+        "update_interval_value": {
+          "type": "integer",
+          "minimum": 1,
+          "title": "Update Interval Value",
+          "description": "Numeric value for channel update frequency",
+          "default": 30
+        }
+      }
+    }
+  },
+  "ui": [
+    {
+      "element": "x-spotify-status-card",
+      "moduleUrl": "/api/channels/com.spotify.status/ui/index.esm.js",
+      "styleUrl": "/api/channels/com.spotify.status/ui/styles.css",
+      "slots": ["dashboard.gallery", "dashboard.sidebar"],
+      "propsSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "user": {"type": "object"},
+          "settings": {"type": "object"},
+          "stats": {"type": "object"}
+        }
+      },
+      "renderMode": "element",
+      "integrity": {
+        "module": "sha384-zj1egY+uXM0cums45kW39nx8tD53OEwlZVMQfCJ15ZyIfr4EfX3/RH1CCWNaPi+J",
+        "style": "sha384-Rnsz1SGJKR8L5VKK7MdCa0W5oc7Li+2X4tFskHwTEW+l+49H7DVkXKlktIeRT5s7"
+      }
+    },
+    {
+      "route": "/spotify-status",
+      "element": "x-spotify-status-manager",
+      "moduleUrl": "/api/channels/com.spotify.status/ui/manage.esm.js",
+      "nav": {
+        "label": "Spotify Status",
+        "icon": "image"
+      },
+      "renderMode": "element",
+      "integrity": {
+        "module": "sha384-1jdnyVVU4JYT/1M7JYU9jooMmrUjarvthk87je2LLjdARvjjxduNoQsRGk7aemaJ"
+      }
+    }
+  ],
+  "assets": [
+    {
+      "name": "logo",
+      "url": "/api/channels/com.spotify.status/assets/logo.svg"
+    }
+  ],
   "endpoints": [
     {
       "path": "/manifest",
@@ -28,7 +136,7 @@
       "description": "Get channel manifest and capabilities"
     },
     {
-      "path": "/request_image", 
+      "path": "/request_image",
       "method": "POST",
       "description": "Get current playing track album art"
     },

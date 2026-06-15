@@ -14,86 +14,16 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
-import sys
-import importlib.util
-import traceback
-from types import ModuleType
 
-# Configure logging early so utility import function can emit diagnostics.
+# Configure logging early.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 _PLUGIN_DIR = Path(__file__).parent
-if str(_PLUGIN_DIR) not in sys.path:
-    # Append so we do not shadow other plugins' generic module names (e.g. models)
-    sys.path.append(str(_PLUGIN_DIR))
 
-def _import_local(module_name: str, file_name: Optional[str] = None) -> ModuleType:
-    """Import a sibling module or package by explicit path with diagnostic logging.
-
-    Supports both single-file modules (``name.py``) and packages (``name/__init__.py``)
-    so we can transition modules into a structured package directory without
-    changing the dynamic import call sites.
-    """
-    # Resolve target path: explicit file_name overrides (used rarely), else prefer
-    # package directory if it exists, falling back to a .py module file.
-    pkg_dir = _PLUGIN_DIR / module_name
-    is_package = False
-    if file_name:
-        target = _PLUGIN_DIR / file_name
-    elif pkg_dir.is_dir() and (pkg_dir / "__init__.py").exists():
-        target = pkg_dir / "__init__.py"
-        is_package = True
-    else:
-        target = _PLUGIN_DIR / f"{module_name}.py"
-
-    logger.debug(
-        "[SpotifyStatusChannel] BEGIN import module=%s target=%s package=%s", module_name, target, is_package
-    )
-    if not target.exists():
-        logger.error(
-            "[SpotifyStatusChannel] Missing module file module=%s path=%s", module_name, target
-        )
-        raise ImportError(f"Local module file not found: {target}")
-
-    unique_name = f"spotify_status_{module_name}"
-    # Build spec; for packages we need to set submodule search locations so that
-    # any future relative imports inside the package continue to work.
-    spec = importlib.util.spec_from_file_location(
-        unique_name,
-        target,
-        submodule_search_locations=[str(pkg_dir)] if is_package else None,  # type: ignore[arg-type]
-    )
-    if spec is None or spec.loader is None:
-        logger.error(
-            "[SpotifyStatusChannel] Failed creating spec module=%s path=%s", module_name, target
-        )
-        raise ImportError(f"Cannot load spec for {target}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[unique_name] = module  # Pre-register for decorators/dataclasses
-    try:
-        spec.loader.exec_module(module)  # type: ignore[assignment]
-    except Exception as e:  # noqa: BLE001
-        tb = traceback.format_exc()
-        logger.error(
-            "[SpotifyStatusChannel] Exception executing module=%s path=%s error=%s\n%s",
-            module_name,
-            target,
-            e,
-            tb,
-        )
-        raise ImportError(f"Failed executing {target}: {e}") from e
-    logger.debug(
-        "[SpotifyStatusChannel] END import module=%s path=%s package=%s", module_name, target, is_package
-    )
-    return module
-
-# Load local modules explicitly (no relative import usage). Renderer is optional for manifest to load.
+# --- Local module imports via package relative imports ---
 try:
-    renderer_mod = _import_local("renderer")
-    PillowRenderer = getattr(renderer_mod, "PillowRenderer")
-    RenderOptions = getattr(renderer_mod, "RenderOptions")
+    from .renderer import PillowRenderer, RenderOptions
 except Exception as e:  # noqa: BLE001
     logger.warning("[SpotifyStatusChannel] Pillow renderer unavailable (%s) – continuing; image requests will fail", e)
     class RenderOptions:  # type: ignore
@@ -110,55 +40,19 @@ except Exception as e:  # noqa: BLE001
             raise RuntimeError("Pillow renderer unavailable")
 
 try:
-    svg_renderer_mod = _import_local("svg_renderer")
-    SvgRenderer = getattr(svg_renderer_mod, "SvgRenderer")
+    from .svg_renderer import SvgRenderer
 except Exception as e:  # noqa: BLE001
     logger.warning("[SpotifyStatusChannel] SVG renderer unavailable (%s) – continuing without SVG", e)
     class SvgRenderer:  # type: ignore
         available = False
 
-try:
-    service_mod = _import_local("service")
-    SpotifyService = getattr(service_mod, "SpotifyService")
-except Exception as e:  # noqa: BLE001
-    logger.error("[SpotifyStatusChannel] Failed loading service module: %s", e)
-    raise
-
-try:
-    # Always import models package (supports new directory layout). The legacy
-    # top-level models.py file has been removed after migration.
-    models_mod = _import_local("models")
-    TrackInfo = getattr(models_mod, "TrackInfo")
-except Exception as e:  # noqa: BLE001
-    logger.error("[SpotifyStatusChannel] Failed loading models package: %s", e)
-    raise
-
-try:
-    push_mod = _import_local("push")
-    PushManager = getattr(push_mod, "PushManager")
-except Exception as e:  # noqa: BLE001
-    logger.error("[SpotifyStatusChannel] Failed loading push module: %s", e)
-    raise
+from .service import SpotifyService
+from .models import TrackInfo
+from .push import PushManager
 
 _SPOTIPY_AVAILABLE = False
 spotipy = None  # type: ignore
 SpotifyOAuth = None  # type: ignore
-
-# (logging configured above)
-
-# Remove generic module names that may pollute global import space if an older
-# version of this plugin was previously loaded (pre-sandbox). This prevents
-# other plugins that do 'import models' from accidentally binding to our
-# TrackInfo-only module instead of their own richer models module.
-_possibly_conflicting = ["models", "service", "renderer", "push", "svg_renderer"]
-for _name in _possibly_conflicting:
-    _m = sys.modules.get(_name)
-    try:
-        if _m and getattr(_m, "__file__", "").startswith(str(_PLUGIN_DIR)):
-            del sys.modules[_name]
-            logger.debug("[SpotifyStatusChannel] Removed stray global module alias '%s'", _name)
-    except Exception:  # noqa: BLE001
-        pass
 
 try:  # Optional dependency guard so router still mounts even if spotipy missing
     import spotipy  # type: ignore
@@ -166,18 +60,8 @@ try:  # Optional dependency guard so router still mounts even if spotipy missing
     _SPOTIPY_AVAILABLE = True
 except ImportError:  # noqa: BLE001
     logger.warning("[SpotifyStatusChannel] 'spotipy' not installed – channel running in degraded mode (no Spotify API calls)")
-try:
-    from fastapi import APIRouter
-except Exception:  # noqa: BLE001
-    class APIRouter:  # type: ignore
-        def __init__(self, *_, **__):
-            raise ImportError("fastapi is required for router construction")
 
-# Attempt optional imports for HTML rendering pathway
-_JINJA2_AVAILABLE = False  # HTML rendering pathway removed
-_PLAYWRIGHT_AVAILABLE = False
-
-# (logging already configured above)
+from fastapi import APIRouter
 
 
 class SpotifyStatusChannel:
@@ -881,16 +765,9 @@ class SpotifyStatusChannel:
     # ...existing code...
     def get_router(self) -> APIRouter:
         """Delegate to external routes factory for cleaner separation."""
-        # Load routes/main.py explicitly by file path to avoid relative import
-        # issues when the plugin is loaded under a synthetic module name.
-        try:
-            routes_mod = _import_local("routes/main", file_name="routes/main.py")
-            build_router = getattr(routes_mod, "build_router")
-            logger.debug("[SpotifyStatusChannel] build_router loaded via explicit path")
-            return build_router(self)
-        except Exception as e:  # noqa: BLE001
-            logger.error("[SpotifyStatusChannel] Failed to construct router: %s", e)
-            raise
+        from .routes.main import build_router
+
+        return build_router(self)
 
     # =========================================================================
     # Push / Event Streaming (delegated to PushManager)

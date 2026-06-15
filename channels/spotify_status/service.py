@@ -9,45 +9,7 @@ import logging
 import time
 from typing import Optional, Dict, Any, Callable
 
-# NOTE: Avoid relative import ('.models') because the plugin may be loaded under a
-# synthetic module name without a proper package parent. We first attempt a
-# direct import of the "models" package (now the canonical location). If that
-# fails (e.g., name collision with an unrelated global module), we explicitly
-# load our sibling package via path.
-try:  # Normal case: plugin directory already on sys.path (set in channel.py)
-    from models import TrackInfo  # type: ignore
-except Exception:  # noqa: BLE001
-    import importlib.util, sys
-    from pathlib import Path
-    _SERVICE_DIR = Path(__file__).parent
-    _pkg_dir = _SERVICE_DIR / "models"
-    _init_file = _pkg_dir / "__init__.py"
-    if _init_file.exists():
-        unique_name = "spotify_status_models"
-        existing = sys.modules.get(unique_name)
-        if existing is not None:
-            TrackInfo = getattr(existing, "TrackInfo", None)  # type: ignore
-            if TrackInfo is None:
-                raise ImportError("Loaded spotify_status_models package missing TrackInfo")
-        else:
-            _spec = importlib.util.spec_from_file_location(
-                unique_name,
-                _init_file,
-                submodule_search_locations=[str(_pkg_dir)],  # type: ignore[arg-type]
-            )
-            if _spec and _spec.loader:  # type: ignore[attr-defined]
-                _mod = importlib.util.module_from_spec(_spec)
-                sys.modules[unique_name] = _mod  # Pre-register for dataclass decorators
-                try:
-                    _spec.loader.exec_module(_mod)  # type: ignore[attr-defined]
-                    TrackInfo = getattr(_mod, "TrackInfo")  # type: ignore
-                except Exception as _import_err:  # noqa: BLE001
-                    sys.modules.pop(unique_name, None)
-                    raise ImportError(
-                        f"Failed dynamic-load of models package for service: {_import_err}"
-                    ) from _import_err
-            else:
-                raise ImportError("Could not construct spec for models package in service dynamic import")
+from .models import TrackInfo
     else:
         raise ImportError("models package not found adjacent to service.py; cannot proceed")
 

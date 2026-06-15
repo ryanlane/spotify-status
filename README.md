@@ -1,166 +1,165 @@
-# Spotify Status Channel Plugin
+# Spotify Now Playing — Mimir Source Plugin
 
-A Mimir platform plugin that displays currently playing Spotify track information and album art for e-paper displays.
+A Spotify integration plugin for the [Mimir](https://github.com/ryanlane/mimir) platform. Displays the currently playing track as a generated image — album art, track metadata, or a top-items view — suitable for e-ink and other low-refresh displays.
+
+**Plugin ID:** `com.spotify.status`
+**Version:** 1.0.1
+**Author:** Ryan Lane
+
+---
 
 ## Features
 
-- 🎵 Real-time Spotify playback monitoring
-- 🖼️ Album art display with metadata overlay
-- 📊 Progress bar and track information
-- 🌐 Web UI for configuration and testing
-- 🔄 Automatic refresh and caching
-- 📱 Responsive design for e-paper displays
+- Displays currently playing Spotify track with album art
+- Three visual modes: Album Art only, Album + Artist + Title overlay, Top Items
+- Portrait and landscape layout support
+- OAuth 2.0 authentication flow handled in-browser through the management UI
+- Configurable update interval
+- Fallback image when nothing is playing
+- Dashboard card widget and full management page
 
-## Setup Instructions
+---
 
-### 1. Spotify App Configuration
+## Prerequisites
+
+Before installing, you need a Spotify Developer application with the correct redirect URI configured.
+
+### Create a Spotify App
 
 1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
 2. Create a new application
-3. Note your `Client ID` and `Client Secret`
-4. Add `http://localhost:8080/callback` to the Redirect URIs
-5. Save your settings
-
-### 2. Plugin Installation
-
-1. Copy this plugin directory to your Mimir channels folder:
-   ```bash
-   cp -r channels/spotify_status /path/to/mimir-api/channels/
+3. Under **Redirect URIs**, add:
    ```
-
-2. Install required Python dependencies:
-   ```bash
-   pip install spotipy pillow requests pydantic
+   http://127.0.0.1:5000/api/channels/com.spotify.status/callback
    ```
+   Adjust the host/port if your Mimir API runs elsewhere.
+4. Note your **Client ID** and **Client Secret**
 
-### 3. Configuration
+---
 
-Create a configuration file for the plugin with your Spotify credentials:
+## Installation
 
-```json
-{
-  "spotify": {
-    "client_id": "your_spotify_client_id",
-    "client_secret": "your_spotify_client_secret",
-    "redirect_uri": "http://localhost:8080/callback"
-  },
-  "display": {
-    "default_width": 800,
-    "default_height": 480,
-    "include_progress": true,
-    "include_metadata": true
-  }
-}
+### Via Mimir Plugin Store (recommended)
+
+Open the Mimir UI, go to **Sources**, click **Browse Store**, and search for "Spotify". Click **Install**.
+
+After installing, open the source settings and enter your Client ID and Client Secret, then complete the OAuth flow from the management interface.
+
+### Via git URL
+
+In **Sources → Install Source**, paste:
+
+```
+https://github.com/ryanlane/mimir-channel-spotify.git
 ```
 
-### 4. Authentication
+### Manual
 
-1. Start the Mimir API server
-2. Visit the plugin UI at: `http://localhost:8080/api/channels/com.spotify.status/ui/index.html`
-3. The first time you access the API, you'll be redirected to Spotify for authentication
-4. Grant the required permissions (read currently playing track)
-5. You'll be redirected back and the plugin will be ready to use
+```bash
+git clone https://github.com/ryanlane/mimir-channel-spotify.git
+cp -r mimir-channel-spotify/channels/spotify_status /path/to/mimir-api/channels/
+pip install -r channels/spotify_status/requirements.txt
+```
+
+Restart (or hot-reload) the Mimir API — the channel is auto-discovered.
+
+---
+
+## Requirements
+
+- Mimir Platform v2.1.0+
+- Python 3.8+
+- `fastapi`, `requests`, `pillow`, `spotipy`
+- A Spotify account (free or premium)
+
+---
+
+## Configuration
+
+Settings are entered through the plugin's management interface or at `/api/channels/com.spotify.status/settings`.
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `client_id` | string | — | Spotify app Client ID |
+| `client_secret` | string | — | Spotify app Client Secret |
+| `redirect_uri` | string | `http://127.0.0.1:5000/api/channels/com.spotify.status/callback` | Must match exactly what's in your Spotify app |
+| `visual` | string | `"Album Art"` | Display mode: `Album Art`, `Album, Artist, and Title`, `Top Items` |
+| `orientation` | string | — | Layout: `portrait` or `landscape` |
+| `update_interval_value` | integer | `30` | How often Mimir polls this channel for a new image |
+| `update_interval_unit` | string | `"minutes"` | Unit for interval: `seconds`, `minutes`, `hours`, `days` |
+
+### First-time authentication
+
+After saving your Client ID and Client Secret, open the management interface and follow the "Connect Spotify" link. You'll be redirected to Spotify to authorize the `user-read-currently-playing` scope. On success you'll be redirected back and the channel will be ready.
+
+The OAuth token is cached in `data/.spotify_cache` and refreshed automatically.
+
+---
 
 ## API Endpoints
 
-### Core Plugin Endpoints
+All endpoints are prefixed with `/api/channels/com.spotify.status`.
 
-- `GET /api/channels/com.spotify.status/manifest` - Plugin capabilities and info
-- `POST /api/channels/com.spotify.status/request_image` - Generate status image
-- `GET /api/channels/com.spotify.status/health` - Check plugin health
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/manifest` | Channel capabilities and schema |
+| `POST` | `/request_image` | Generate and return the current track image |
+| `GET` | `/current-track` | Get currently playing track metadata as JSON |
+| `GET` | `/health` | Check Spotify API connectivity and auth status |
+| `GET` | `/callback` | OAuth redirect handler (Spotify → Mimir) |
 
-### Custom Endpoints
+---
 
-- `GET /api/channels/com.spotify.status/current-track` - Get current track info
-- `POST /api/channels/com.spotify.status/auth/callback` - OAuth callback handler
+## Management Interface
 
-## Usage Examples
+The plugin registers a management page accessible by clicking the source in **Sources**. From there you can:
 
-### Get Current Track
-```bash
-curl http://localhost:8080/api/channels/com.spotify.status/current-track
-```
+- Enter and save Spotify credentials
+- Authorize the Spotify connection
+- View the currently playing track in real time
+- Manually trigger an image refresh
+- Switch visual modes and orientation
 
-### Generate Status Image
-```bash
-curl -X POST http://localhost:8080/api/channels/com.spotify.status/request_image \
-  -H "Content-Type: application/json" \
-  -d '{"options": {"width": 800, "height": 480}}'
-```
+A compact dashboard card is also available showing live playback status.
 
-## Image Generation
-
-The plugin generates images with:
-
-- **Album Art**: Downloaded from Spotify and resized to fit
-- **Track Information**: Song title, artist, and album name
-- **Progress Bar**: Current playback position
-- **Device Info**: What device is playing the music
-- **Fallback**: "No music playing" message when nothing is active
-
-### Customization Options
-
-- `width` / `height`: Display dimensions (default: 800x480)
-- `include_metadata`: Show track info text (default: true)
-- `include_progress`: Show progress bar (default: true)
-
-## Web UI
-
-Access the management interface at:
-```
-http://localhost:8080/api/channels/com.spotify.status/ui/index.html
-```
-
-Features:
-- Real-time track status
-- Connection status indicator
-- Manual refresh and image generation
-- Error handling and diagnostics
+---
 
 ## File Structure
 
 ```
 channels/spotify_status/
-├── plugin.json              # Plugin configuration
-├── channel.py               # Main plugin class
-├── services/
-│   └── __init__.py         # Spotify and image services
-├── models/
-│   └── __init__.py         # Data models
+├── plugin.json          # Channel manifest (id, schema, UI registration)
+├── channel.py           # SpotifyStatusChannel implementation
+├── services/            # Spotify API client and image generation
+├── models/              # Data models
+├── requirements.txt     # Python dependencies
 ├── ui/
-│   ├── index.html          # Web interface
-│   ├── manage.esm.js       # Web component
-│   └── styles.css          # Styling
-└── data/                   # Runtime data (OAuth cache, etc.)
+│   ├── index.esm.js     # Dashboard card Web Component
+│   ├── manage.esm.js    # Management page Web Component
+│   └── styles.css       # Component styles
+└── data/
+    └── .spotify_cache   # Spotipy OAuth token cache (auto-managed)
 ```
+
+---
 
 ## Troubleshooting
 
-### Common Issues
+**Authentication error / redirect URI mismatch:** The URI in your Spotify Developer Dashboard must match `redirect_uri` in your settings exactly — including protocol, host, port, and path. No trailing slashes.
 
-1. **Authentication Errors**
-   - Check your Spotify app credentials
-   - Ensure redirect URI matches exactly
-   - Clear the OAuth cache in `data/.spotify_cache`
+**Nothing playing / fallback image shown:** The plugin shows a fallback when Spotify reports no active playback. Start playing something on any Spotify client connected to your account.
 
-2. **No Music Detected**
-   - Start playing music on Spotify
-   - Check that the same Spotify account is used for auth
-   - Verify the required scopes are granted
+**Token expired:** Spotipy handles token refresh automatically. If refresh fails, clear `data/.spotify_cache` and re-authorize from the management interface.
 
-3. **Image Generation Fails**
-   - Check internet connectivity for album art download
-   - Verify PIL/Pillow is installed correctly
-   - Check logs for specific error messages
+**Wrong account:** The Spotify account used to authorize must be the same one currently playing music. Authorizing with a different account will not see playback from the other.
 
-### Debugging
-
-Enable debug logging by setting the log level:
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
+**Health check:**
+```bash
+curl http://localhost:5000/api/channels/com.spotify.status/health
 ```
+
+---
 
 ## License
 
-This plugin is part of the Mimir platform and follows the same licensing terms.
+Same terms as the Mimir platform.
